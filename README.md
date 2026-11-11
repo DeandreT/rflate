@@ -15,13 +15,11 @@ Code written for fflate works unchanged: replace `'fflate'` with `'rflate'` in y
 
 ## Install
 
-rflate is not on npm yet. Install it from GitHub, which builds it from source (needs Rust and the `wasm32-unknown-unknown` target):
-
 ```sh
-npm install github:DeandreT/rflate --allow-git=root
+npm install rflate
 ```
 
-npm 12 and later block git dependencies unless `--allow-git` is given.
+The package ships prebuilt, so installing it needs no Rust toolchain.
 
 ## Benchmarks
 
