@@ -133,7 +133,7 @@ const dopt = (dat: Uint8Array, opt: DeflateOptions, pre: number, post: number, m
 out = cut(out, "// deflate with opts\nconst dopt", "// Walmart object spread", dopt + "  \n\n")
 # Workers receive the compiled module instead of the engine's source.
 out = out.replace("  if (!ch[id]) {\n    let fnStr", "  wx();\n  if (!ch[id]) {\n    let fnStr", 1)
-out = cut(out, "const bInflt = () =>", "\n", "const bInflt = () => [u8, et, ec, err, slc, wm, wx, wput, wget, wreg, wunreg, istr, inflt, inflateSync, pbf, gopt];")
+out = cut(out, "const bInflt = () =>", "\n", "const bInflt = () => [u8, et, ec, err, slc, wm, wx, wput, wget, wreg, wunreg, cat, isc, icp, inflt, inflateSync, pbf, gopt];")
 out = cut(out, "const bDflt = () =>", "\n", "const bDflt = () => [u8, et, ec, err, slc, wm, wx, wput, wget, wreg, wunreg, dopt, deflateSync, pbf];")
 out = cut(out, "const gze = () =>", "\n", "const gze = () => [gzh, gzhl, wbytes, crc, crct];")
 out = cut(out, "const guze = () =>", "\n", "const guze = () => [gzs, gzl, cat];")

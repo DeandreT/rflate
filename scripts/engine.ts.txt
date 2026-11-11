@@ -36,13 +36,26 @@ const wbd = (s: string) => {
   return o;
 }
 
-// compiled module (sent to workers), instance exports
-let wm: WebAssembly.Module;
-let wq: WasmCore;
+// Compiled module, sent to workers by structured clone. The instance and the
+// cleanup registry live on the module object rather than in free variables: the
+// clone drops them, so each worker instantiates its own, and minifiers cannot
+// rewrite an existence check into a reference to an undeclared worker variable.
+type WasmModule = WebAssembly.Module & { x?: WasmCore, r?: FinalizationRegistry<number> | false };
+let wm: WasmModule;
 
 // get the WebAssembly exports, instantiating on first use
-const wx = (): WasmCore => (typeof wq != 'undefined' && wq) ||
-  (wq = new WebAssembly.Instance(wm || (wm = new WebAssembly.Module(wbd(wsrc))), {}).exports as unknown as WasmCore);
+const wx = (): WasmCore => {
+  if (!wm) wm = new WebAssembly.Module(wbd(wsrc));
+  if (!wm.x) {
+    const x = wm.x = new WebAssembly.Instance(wm, {}).exports as unknown as WasmCore;
+    // frees stream state that was never finished (positive: deflate, negative: inflate)
+    wm.r = typeof FinalizationRegistry != 'undefined' && new FinalizationRegistry((h: number) => {
+      if (h > 0) x.def_free(h);
+      else x.inf_free(-h);
+    });
+  }
+  return wm.x;
+}
 
 // copy one or two arrays into the WebAssembly scratch buffer
 const wput = (x: WasmCore, a: Uint8Array, b?: Uint8Array) => {
@@ -60,16 +73,11 @@ const wget = (x: WasmCore, p: number, pre: number, post: number) => {
   return o;
 }
 
-// frees stream state that was never finished (positive: deflate, negative: inflate)
-const wfr = typeof FinalizationRegistry != 'undefined' && /*#__PURE__*/ new FinalizationRegistry((h: number) => {
-  if (h > 0) wx().def_free(h);
-  else wx().inf_free(-h);
-});
 const wreg = (o: object, h: number) => {
-  if (typeof wfr != 'undefined' && wfr) wfr.register(o, h, o);
+  if (wm.r) wm.r.register(o, h, o);
 }
 const wunreg = (o: object) => {
-  if (typeof wfr != 'undefined' && wfr) wfr.unregister(o);
+  if (wm.r) wm.r.unregister(o);
 }
 
 // concatenate
@@ -82,43 +90,55 @@ const cat = (a: Uint8Array, b: Uint8Array) => {
 // byte swap (big-endian Adler-32 written with wbytes)
 const bsw = (v: number) => (v & 255) << 24 | (v & 0xFF00) << 8 | (v >>> 8 & 0xFF00) | (v >>> 24);
 
-// Incompressible data is stored as raw blocks; copying those directly in JS avoids
-// three passes through WebAssembly memory. Returns null unless every block up to
-// the final one is stored and complete.
-const istr = (dat: Uint8Array, out?: Uint8Array, sz?: number) => {
+// Incompressible data is mostly stored blocks. Copying those directly in JS avoids
+// three passes through WebAssembly memory; only the blocks after them go to the
+// engine. isc returns [input offset after the leading stored blocks, their output
+// size, whether the last of them was final].
+const isc = (dat: Uint8Array) => {
   const l = dat.length;
   let p = 0, n = 0, f = 0;
-  for (; !f; ) {
-    if (p + 5 > l || (dat[p] & 6)) return null;
+  while (!f && p + 5 <= l && !(dat[p] & 6)) {
     const len = dat[p + 1] | dat[p + 2] << 8;
-    if ((len ^ (dat[p + 3] | dat[p + 4] << 8)) != 65535 || p + 5 + len > l) return null;
+    if ((len ^ (dat[p + 3] | dat[p + 4] << 8)) != 65535 || p + 5 + len > l) break;
     f = dat[p] & 1, n += len, p += 5 + len;
   }
-  const cap = out ? out.length : sz || n, o = out || new u8(Math.min(n, cap));
+  return [p, n, f];
+}
+
+// copies the stored blocks in dat[0, e) into o, at most o.length bytes
+const icp = (dat: Uint8Array, e: number, o: Uint8Array) => {
   let w = 0;
-  for (p = 0; w < cap; ) {
-    const len = dat[p + 1] | dat[p + 2] << 8, c = Math.min(len, cap - w);
+  for (let p = 0; p < e && w < o.length; ) {
+    const len = dat[p + 1] | dat[p + 2] << 8, c = Math.min(len, o.length - w);
     o.set(dat.subarray(p + 5, p + 5 + c), w);
-    w += c;
-    if (dat[p] & 1) break;
-    p += 5 + len;
+    w += c, p += 5 + len;
   }
-  return out ? out.subarray(0, w) : o;
+  return w;
 }
 
 // one-shot inflate. out: buffer to fill (truncates), sz: known output size (truncates)
 const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number) => {
   if (!dat.length || (out && !out.length) || sz === 0) return out || new u8(0);
-  if (!(dat[0] & 6)) {
-    const st = istr(dat, out, sz);
-    if (st) return st;
+  const cap = out ? out.length : sz || 0, x = wx();
+  const [p, n, f] = dat[0] & 6 ? [0, 0, 0] : isc(dat);
+  let o: Uint8Array = out, w = 0, d = dict ? dict.subarray(-32768) : et;
+  if (p) {
+    o = out || new u8(cap ? Math.min(cap, f ? n : cap) : n);
+    w = icp(dat, p, o);
+    if (f || w == cap) return out ? out.subarray(0, w) : w == o.length ? o : slc(o, 0, w);
+    d = w < 32768 && d.length ? cat(d.subarray(w - 32768), o.subarray(0, w)) : o.subarray(Math.max(0, w - 32768), w);
+    dat = dat.subarray(p);
   }
-  const x = wx(), d = dict ? dict.subarray(-32768) : et;
   wput(x, d, dat);
-  const p = x.inflate_once(d.length, dat.length, out ? out.length : sz || 0, 0);
-  if (!out) return wget(x, p, 0, 0);
-  if (!p) err(x.err());
-  const n = x.out_len();
-  out.set(new u8(x.memory.buffer, p, n));
-  return out.subarray(0, n);
+  const q = x.inflate_once(d.length, dat.length, cap ? cap - w : 0, 0);
+  if (!q) err(x.err());
+  const t = x.out_len(), r = new u8(x.memory.buffer, q, t);
+  if (out || (cap && w)) {
+    o.set(r, w);
+    return out ? out.subarray(0, w + t) : w + t == o.length ? o : slc(o, 0, w + t);
+  }
+  if (!w) return slc(r, 0);
+  const res = new u8(w + t);
+  res.set(o), res.set(r, w);
+  return res;
 }

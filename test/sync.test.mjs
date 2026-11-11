@@ -182,4 +182,27 @@ test('stored-block fast path matches the engine, including truncation', () => {
   same(r.inflateSync(mixed), concat([new Uint8Array([1, 2, 3]), text(0)]).length ? r.inflateSync(mixed) : null);
   same(f.inflateSync(mixed), r.inflateSync(mixed));
   same(r.inflateSync(new Uint8Array([1, 0, 0, 0xff, 0xff])), new Uint8Array(0));
+  // the engine emits stored blocks followed by a short Huffman block for random data
+  const rnd = bytes(1 << 20), gz = r.gzipSync(rnd);
+  same(r.gunzipSync(gz), rnd);
+  same(r.inflateSync(gz.subarray(10, -8)), rnd);
+  same(r.inflateSync(gz.subarray(10, -8), { out: new Uint8Array(1 << 21) }), rnd);
+  same(r.inflateSync(gz.subarray(10, -8), { out: new Uint8Array(1048570) }), rnd.subarray(0, 1048570));
+  same(r.inflateSync(gz.subarray(10, -8), { out: new Uint8Array(70000) }), rnd.subarray(0, 70000));
+  // stored prefix, then a compressed block that refers back into it
+  const tail = rnd.subarray(0, 20000);
+  const s1 = new r.Deflate({ level: 0 }, () => {});
+  const parts = [];
+  const s2 = new r.Deflate({ level: 0 }, d => parts.push(d));
+  s2.push(rnd.subarray(0, 100000));
+  s2.flush(true);
+  const prefix = concat(parts);
+  const back = r.deflateSync(tail, { dictionary: rnd.subarray(0, 100000) });
+  const joined = concat([prefix, back]);
+  same(r.inflateSync(joined), concat([rnd.subarray(0, 100000), tail]));
+  same(f.inflateSync(joined), concat([rnd.subarray(0, 100000), tail]));
+  // with a user dictionary as well
+  const dictionary = bytes(5000);
+  const dz = r.deflateSync(rnd.subarray(0, 300000), { dictionary });
+  same(r.inflateSync(dz, { dictionary }), rnd.subarray(0, 300000));
 });

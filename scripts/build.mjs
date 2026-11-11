@@ -82,8 +82,10 @@ const src = readFileSync(join(libDir, 'index.cjs'), 'utf8');
 const out = await minify(src, opts);
 const wkrOut = (await minify(readFileSync(join(libDir, 'worker.cjs'), 'utf8'), opts)).code
   .replace(/exports.__esModule=!0;/, '').replace(/exports\./g, '_f.');
+// fflate's UMD leaves `exports.default` in the Node worker shim, which breaks
+// async calls under Node; both shims write to the wrapper object here.
 const nodeWkrOut = (await minify(readFileSync(join(libDir, 'node-worker.cjs'), 'utf8'), opts)).code
-  .replace(/exports.__esModule=!0;/, '');
+  .replace(/exports.__esModule=!0;/, '').replace(/exports\./g, '_f.');
 const umd = "!function(f){typeof module!='undefined'&&typeof exports=='object'?module.exports=f():typeof define!='undefined'&&define.amd?define(f):(typeof self!='undefined'?self:this).rflate=f()}(function(){var _e={};" +
   out.code.replace(/exports\.(.*) = void 0;\n/, '').replace(/exports\./g, '_e.').replace(/require\("\.\/node-worker\.cjs"\)/,
     () => "(typeof module!='undefined'&&typeof exports=='object'?function(_f){" + nodeWkrOut + 'return _f}:function(_f){' + wkrOut + 'return _f})({})'
