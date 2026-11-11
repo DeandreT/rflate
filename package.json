@@ -1,5 +1,5 @@
 {
-  "name": "rflate",
+  "name": "@deandret/rflate",
   "version": "0.1.0",
   "description": "fflate's API with a Rust/WebAssembly DEFLATE engine: (de)compression for GZIP, Zlib, raw DEFLATE and ZIP",
   "main": "./lib/index.cjs",
@@ -98,5 +98,8 @@
   },
   "engines": {
     "node": ">=16.4"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

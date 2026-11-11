@@ -5,18 +5,18 @@
 rflate keeps fflate's exports, options, stream classes, async (worker) functions, error codes and ZIP support, and swaps the JavaScript compressor and decompressor for [zlib-rs](https://github.com/trifectatechfoundation/zlib-rs). In benchmarks it is 2.5–10× faster than fflate across operations in Node, Chromium and Firefox, and compresses at least as well at every level.
 
 ```js
-import { gzipSync, gunzipSync, zipSync, unzip, strToU8 } from 'rflate';
+import { gzipSync, gunzipSync, zipSync, unzip, strToU8 } from '@deandret/rflate';
 
 const packed = gzipSync(strToU8('hello '.repeat(1000)), { level: 6 });
 const text = gunzipSync(packed);
 ```
 
-Code written for fflate works unchanged: replace `'fflate'` with `'rflate'` in your imports. fflate's documentation applies to every function and class.
+Code written for fflate works unchanged: replace `'fflate'` with `'@deandret/rflate'` in your imports. fflate's documentation applies to every function and class.
 
 ## Install
 
 ```sh
-npm install rflate
+npm install @deandret/rflate
 ```
 
 The package ships prebuilt, so installing it needs no Rust toolchain.
