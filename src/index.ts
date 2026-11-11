@@ -196,13 +196,17 @@ const isc = (dat: Uint8Array) => {
   return [p, n, f];
 }
 
-// copies the stored blocks in dat[0, e) into o, at most o.length bytes
-const icp = (dat: Uint8Array, e: number, o: Uint8Array) => {
+// copies output bytes [k, k + o.length) of the stored blocks in dat[0, e) into o
+const icp = (dat: Uint8Array, e: number, o: Uint8Array, k: number) => {
   let w = 0;
-  for (let p = 0; p < e && w < o.length; ) {
-    const len = dat[p + 1] | dat[p + 2] << 8, c = Math.min(len, o.length - w);
-    o.set(dat.subarray(p + 5, p + 5 + c), w);
-    w += c, p += 5 + len;
+  for (let p = 0, q = 0; p < e && w < o.length; ) {
+    const len = dat[p + 1] | dat[p + 2] << 8;
+    if (q + len > k) {
+      const s = Math.max(k - q, 0), c = Math.min(len - s, o.length - w);
+      o.set(dat.subarray(p + 5 + s, p + 5 + s + c), w);
+      w += c;
+    }
+    q += len, p += 5 + len;
   }
   return w;
 }
@@ -212,26 +216,24 @@ const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number
   if (!dat.length || (out && !out.length) || sz === 0) return out || new u8(0);
   const cap = out ? out.length : sz || 0, x = wx();
   const [p, n, f] = dat[0] & 6 ? [0, 0, 0] : isc(dat);
-  let o: Uint8Array = out, w = 0, d = dict ? dict.subarray(-32768) : et;
+  let d = dict ? dict.subarray(-32768) : et;
   if (p) {
-    o = out || new u8(cap ? Math.min(cap, f ? n : cap) : n);
-    w = icp(dat, p, o);
-    if (f || w == cap) return out ? out.subarray(0, w) : w == o.length ? o : slc(o, 0, w);
-    d = w < 32768 && d.length ? cat(d.subarray(w - 32768), o.subarray(0, w)) : o.subarray(Math.max(0, w - 32768), w);
-    dat = dat.subarray(p);
+    if (f || (cap && n >= cap)) {
+      const o = out || new u8(cap ? Math.min(n, cap) : n), w = icp(dat, p, o, 0);
+      return out ? out.subarray(0, w) : o;
+    }
+    // the rest of the stream may refer back into the stored data
+    const h = new u8(Math.min(n, 32768));
+    icp(dat, p, h, n - h.length);
+    d = h.length < 32768 && d.length ? cat(d.subarray(h.length - 32768), h) : h;
   }
-  wput(x, d, dat);
-  const q = x.inflate_once(d.length, dat.length, cap ? cap - w : 0, 0);
+  wput(x, d, p ? dat.subarray(p) : dat);
+  const q = x.inflate_once(d.length, dat.length - p, cap ? cap - n : 0, 0);
   if (!q) err(x.err());
-  const t = x.out_len(), r = new u8(x.memory.buffer, q, t);
-  if (out || (cap && w)) {
-    o.set(r, w);
-    return out ? out.subarray(0, w + t) : w + t == o.length ? o : slc(o, 0, w + t);
-  }
-  if (!w) return slc(r, 0);
-  const res = new u8(w + t);
-  res.set(o), res.set(r, w);
-  return res;
+  const t = x.out_len(), o = out || new u8(n + t);
+  o.set(new u8(x.memory.buffer, q, t), n);
+  if (p) icp(dat, p, o, 0);
+  return out ? out.subarray(0, n + t) : o;
 }
 
 // crc check
