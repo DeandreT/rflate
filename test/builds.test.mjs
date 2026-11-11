@@ -20,3 +20,21 @@ test('package exports resolve', async () => {
     assert.ok(require('node:fs').existsSync(new URL(f, new URL('../', import.meta.url))), f);
   }
 });
+
+test('minified UMD async streams (workers rebuild classes from minified source)', async () => {
+  const L = require('../umd/index.js');
+  const data = new TextEncoder().encode('stream check '.repeat(20000));
+  for (const [C, D] of [['AsyncDeflate', 'AsyncInflate'], ['AsyncGzip', 'AsyncGunzip'], ['AsyncZlib', 'AsyncUnzlib']]) {
+    const run = (S, input) => new Promise((res, rej) => {
+      const out = [];
+      const s = new L[S]((e, d, fin) => { if (e) return rej(e); out.push(d); if (fin) res(Buffer.concat(out)); });
+      s.push(input.slice(0, 1000));
+      s.push(input.slice(1000), true);
+    });
+    const c = await run(C, data);
+    assert.deepEqual(new Uint8Array(await run(D, new Uint8Array(c))), data, C);
+  }
+  const z = await new Promise((res, rej) => L.zip({ a: data, b: [data, { level: 9 }] }, (e, d) => (e ? rej(e) : res(d))));
+  const u = await new Promise((res, rej) => L.unzip(z, (e, d) => (e ? rej(e) : res(d))));
+  assert.deepEqual(u.b, data);
+});

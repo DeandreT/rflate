@@ -30,11 +30,14 @@ const E_EOF: i32 = 0;
 const E_BLOCK: i32 = 1;
 const E_LITLEN: i32 = 2;
 const E_DIST: i32 = 3;
+/// Allocation failure (not an fflate code).
+const E_MEM: i32 = 99;
 
 fn map_inflate_error(msg: Option<&str>) -> i32 {
     match msg {
         Some(m) if m.contains("block type") => E_BLOCK,
-        Some(m) if m.contains("distance") => E_DIST,
+        // "invalid distance code", "invalid distance too far back", ...
+        Some(m) if m.starts_with("invalid distance code") || m.contains("distance too far") => E_DIST,
         _ => E_LITLEN,
     }
 }
@@ -44,7 +47,10 @@ fn map_inflate_error(msg: Option<&str>) -> i32 {
 pub extern "C" fn buf(len: usize) -> *mut u8 {
     let g = glob();
     if g.inp.capacity() < len {
-        g.inp = Vec::with_capacity(len);
+        g.inp = Vec::new();
+        if g.inp.try_reserve_exact(len).is_err() {
+            return core::ptr::null_mut();
+        }
     }
     g.inp.as_mut_ptr()
 }
@@ -151,7 +157,9 @@ fn run_deflate(d: &mut Deflate, data: &[u8], flush: DeflateFlush) -> bool {
     loop {
         let used = (d.total_in() - start_in) as usize;
         let spare = (data.len() - used) / 2 + 1024;
-        g.out.reserve(spare);
+        if g.out.try_reserve(spare).is_err() {
+            return false;
+        }
         let before_out = d.total_out();
         let cap = g.out.capacity() - g.out.len();
         let status = match d.compress_uninit(&data[used..], g.out.spare_capacity_mut(), flush) {
@@ -184,7 +192,7 @@ pub extern "C" fn deflate_once(level: i32, mem: i32, mode: i32, dict_len: usize,
     let data = input(dict_len, len);
     let g = glob();
     g.out.clear();
-    g.out.reserve(zlib_rs::compress_bound(len));
+    let _ = g.out.try_reserve(zlib_rs::compress_bound(len));
     let mut d = new_deflate(level, mem, len + dict_len);
     if dict_len > 0 {
         let dict = input(0, dict_len);
@@ -192,8 +200,11 @@ pub extern "C" fn deflate_once(level: i32, mem: i32, mode: i32, dict_len: usize,
     }
     let ok = run_deflate(&mut d, data, DeflateFlush::Finish);
     let g = glob();
-    g.err = if ok { -1 } else { E_LITLEN };
     g.consumed = checksum(mode, initial_checksum(mode), data) as usize;
+    if !ok {
+        g.err = E_MEM;
+        return core::ptr::null();
+    }
     g.out_len = g.out.len();
     g.out.as_ptr()
 }
@@ -234,7 +245,10 @@ pub unsafe extern "C" fn def_push(h: *mut DeflateStream, len: usize, flush: i32)
     };
     let ok = run_deflate(&mut s.d, data, flush);
     let g = glob();
-    g.err = if ok { -1 } else { E_LITLEN };
+    if !ok {
+        g.err = E_MEM;
+        return core::ptr::null();
+    }
     g.out_len = g.out.len();
     g.out.as_ptr()
 }
@@ -271,20 +285,28 @@ fn run_inflate(i: &mut Inflate, data: &[u8], limit: usize) -> i32 {
     let start_in = i.total_in();
     loop {
         let used = (i.total_in() - start_in) as usize;
-        if limit > 0 {
-            if g.out.len() >= limit {
-                return 0;
+        if limit > 0 && g.out.len() >= limit {
+            g.consumed = used;
+            return 0;
+        }
+        if g.out.capacity() - g.out.len() < 1024 {
+            let mut grow = g.out.capacity().max((data.len() - used).saturating_mul(4)).max(32768);
+            if limit > 0 {
+                grow = grow.min(limit - g.out.len());
             }
-        } else if g.out.capacity() - g.out.len() < 1024 {
-            let grow = (g.out.capacity()).max((data.len() - used) * 4).max(32768);
-            g.out.reserve(grow);
+            if g.out.try_reserve(grow).is_err() {
+                g.err = E_MEM;
+                return -1;
+            }
         }
         let before_out = i.total_out();
+        let cur = g.out.len();
+        let spare = g.out.spare_capacity_mut();
         let spare = if limit > 0 {
-            let room = limit - g.out.len();
-            &mut g.out.spare_capacity_mut()[..room]
+            let room = (limit - cur).min(spare.len());
+            &mut spare[..room]
         } else {
-            g.out.spare_capacity_mut()
+            spare
         };
         let room = spare.len();
         let r = i.decompress_uninit(&data[used..], spare, InflateFlush::NoFlush);
@@ -365,8 +387,14 @@ pub extern "C" fn inflate_once(dict_len: usize, len: usize, size: usize, hint: u
     let g = glob();
     g.out.clear();
     g.err = -1;
-    let want = if size > 0 { size } else { hint.max(len.saturating_mul(3)).max(1024) };
-    g.out.reserve(want);
+    // The size can come from an untrusted gzip trailer, so it only caps the
+    // output; the buffer grows as data is actually produced.
+    let guess = hint.max(len.saturating_mul(4)).max(1024);
+    let want = if size > 0 { size.min(guess) } else { guess };
+    if g.out.try_reserve(want).is_err() {
+        g.err = E_MEM;
+        return core::ptr::null();
+    }
     let mut i = Inflate::new(false, 15);
     if dict_len > 0 {
         let _ = i.set_dictionary(input(0, dict_len));

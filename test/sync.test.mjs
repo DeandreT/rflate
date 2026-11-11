@@ -214,3 +214,24 @@ test('stored-block fast path matches the engine, including truncation', () => {
   const dz = r.deflateSync(rnd.subarray(0, 300000), { dictionary });
   same(r.inflateSync(dz, { dictionary }), rnd.subarray(0, 300000));
 });
+
+test('review regressions: empty gzip with out, bogus ISIZE, error codes', () => {
+  const empty = r.gzipSync(new Uint8Array(0));
+  assert.equal(r.gunzipSync(empty, { out: new Uint8Array(100) }).length, 0);
+  assert.equal(f.gunzipSync(empty, { out: new Uint8Array(100) }).length, 0);
+  // a trailer claiming 4 GiB must not trap or allocate it up front
+  const data = text(5000), gz = r.gzipSync(data);
+  gz.set([0xff, 0xff, 0xff, 0xff], gz.length - 4);
+  same(r.gunzipSync(gz), data);
+  // ISIZE smaller than the data truncates like fflate
+  gz.set([100, 0, 0, 0], gz.length - 4);
+  same(r.gunzipSync(gz), f.gunzipSync(gz));
+  // the dictionary is copied when a stream is created
+  const dictionary = text(2000), copy = dictionary.slice();
+  const out = [];
+  const s = new r.Deflate({ dictionary }, d => out.push(d));
+  dictionary.fill(0);
+  const payload = copy.slice(500, 1500);
+  s.push(payload, true);
+  same(r.inflateSync(concat(out), { dictionary: copy }), payload);
+});

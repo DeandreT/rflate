@@ -86,6 +86,7 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
+    "prepare": "node scripts/build.mjs",
     "test": "node --expose-gc --test --test-concurrency=1 test/*.test.mjs",
     "bench": "node --expose-gc bench/run.mjs"
   },
@@ -94,5 +95,8 @@
     "fflate": "0.8.3",
     "terser": "^5.47.1",
     "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=16.4"
   }
 }

@@ -85,8 +85,11 @@ const crc = (): CRCV => {
         c = ~cr;
       } else {
         const x = wx();
-        wput(x, d);
-        c = x.crc32(c, d.length);
+        for (let i = 0; i < d.length; i += 1048576) {
+          const e = d.subarray(i, i + 1048576);
+          wput(x, e);
+          c = x.crc32(c, e.length);
+        }
       }
     },
     d() { return c; }
@@ -110,8 +113,12 @@ const adler = (): CRCV => {
         a = n, b = m;
       } else {
         const x = wx();
-        wput(x, d);
-        const v = x.adler32(((b % 65521) << 16) | (a % 65521), d.length);
+        let v = ((b % 65521) << 16) | (a % 65521);
+        for (let i = 0; i < d.length; i += 1048576) {
+          const e = d.subarray(i, i + 1048576);
+          wput(x, e);
+          v = x.adler32(v, e.length);
+        }
         a = v & 65535, b = v >>> 16;
       }
     },
@@ -129,18 +136,19 @@ const dopt = (dat: Uint8Array, opt: DeflateOptions, pre: number, post: number, m
   wput(x, dict, dat);
   const r = wget(x, x.deflate_once(opt.level == null ? 6 : opt.level, opt.mem == null ? -1 : opt.mem, mode || 0, dict.length, dat.length), pre, post);
   if (ck) ck[0] = x.last_check();
+  wrel(x);
   return r;
 }
 '''
 out = cut(out, "// deflate with opts\nconst dopt", "// Walmart object spread", dopt + "  \n\n")
 # Workers receive the compiled module instead of the engine's source.
 out = out.replace("  if (!ch[id]) {\n    let fnStr", "  wx();\n  if (!ch[id]) {\n    let fnStr", 1)
-out = cut(out, "const bInflt = () =>", "\n", "const bInflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wput, wget, wreg, wunreg, cat, isc, icp, inflt, inflateSync, pbf, gopt];")
-out = cut(out, "const bDflt = () =>", "\n", "const bDflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wput, wget, wreg, wunreg, dopt, deflateSync, pbf];")
+out = cut(out, "const bInflt = () =>", "\n", "const bInflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wrel, wput, wget, wer, wreg, wunreg, ifr, cat, isc, icp, inflt, inflateSync, pbf, gopt];")
+out = cut(out, "const bDflt = () =>", "\n", "const bDflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wrel, wput, wget, wer, wreg, wunreg, dopt, deflateSync, pbf];")
 out = cut(out, "const gze = () =>", "\n", "const gze = () => [gzh, gzhl, wbytes, crc, crct];")
-out = cut(out, "const guze = () =>", "\n", "const guze = () => [gzs, gzl, cat];")
+out = cut(out, "const guze = () =>", "\n", "const guze = () => [gzs, gzl, cat, ifr];")
 out = cut(out, "const zle = () =>", "\n", "const zle = () => [zlh, wbytes, adler, bsw];")
-out = cut(out, "const zule = () =>", "\n", "const zule = () => [zls, cat];")
+out = cut(out, "const zule = () =>", "\n", "const zule = () => [zls, cat, ifr];")
 
 out = replace_block(out, "export class Deflate {", pieces["DEFLATE"])
 out = replace_impl(out, "export function deflateSync(data: Uint8Array, opts?: DeflateOptions) {", pieces["DEFLATESYNC"])

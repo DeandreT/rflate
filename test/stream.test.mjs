@@ -134,3 +134,30 @@ test('many abandoned streams do not exhaust memory', () => {
     if (global.gc && i % 200 == 0) global.gc();
   }
 });
+
+test('Gunzip delivers each member before announcing the next, and data before errors', () => {
+  const a = text(3000), b = text(4000);
+  const all = concat([r.gzipSync(a), r.gzipSync(b)]);
+  const events = [];
+  const s = new r.Gunzip((d, fin) => events.push(['data', d.length, fin]));
+  s.onmember = o => events.push(['member', o]);
+  s.push(all, true);
+  const mi = events.findIndex(e => e[0] == 'member');
+  const before = events.slice(0, mi).reduce((n, e) => n + e[1], 0);
+  assert.equal(before, a.length, 'all of member A precedes onmember(B)');
+  assert.equal(events.filter(e => e[2]).length, 1);
+  // trailing garbage after a member: the member's data arrives, then the error
+  let got = 0;
+  const g = new r.Gunzip(d => { got += d.length; });
+  throwsCode(() => g.push(concat([r.gzipSync(a), new Uint8Array([1, 2, 3, 4, 5, 6])]), true), 6);
+  assert.equal(got, a.length);
+});
+
+test('chunks larger than the 1 MiB slice size', () => {
+  const data = text(3 << 20);
+  for (const [C, D] of pairs) {
+    const c = runStream(r[C], { mtime: 0 }, [data.subarray(0, 2500000), data.subarray(2500000)]);
+    same(f.decompressSync(c), data, C);
+    same(runStream(r[D], null, [c]), data, D);
+  }
+});

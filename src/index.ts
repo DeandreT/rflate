@@ -131,7 +131,7 @@ const wbd = (s: string) => {
 // cleanup registry live on the module object rather than in free variables: the
 // clone drops them, so each worker instantiates its own, and minifiers cannot
 // rewrite an existence check into a reference to an undeclared worker variable.
-type WasmModule = WebAssembly.Module & { x?: WasmCore, r?: FinalizationRegistry<number> | false };
+type WasmModule = WebAssembly.Module & { x?: WasmCore, r?: FinalizationRegistry<number[]> | false, n?: number };
 let wm: WasmModule;
 
 // get the WebAssembly exports, instantiating on first use
@@ -139,10 +139,12 @@ const wx = (): WasmCore => {
   if (!wm) wm = new WebAssembly.Module(wbd(wsrc));
   if (!wm.x) {
     const x = wm.x = new WebAssembly.Instance(wm, {}).exports as unknown as WasmCore;
-    // frees stream state that was never finished (positive: deflate, negative: inflate)
-    wm.r = typeof FinalizationRegistry != 'undefined' && new FinalizationRegistry((h: number) => {
-      if (h > 0) x.def_free(h);
-      else x.inf_free(-h);
+    // frees stream state that was never finished ([handle, 0 deflate / 1 inflate])
+    wm.n = 0;
+    wm.r = typeof FinalizationRegistry != 'undefined' && new FinalizationRegistry((h: number[]) => {
+      if (h[1]) x.inf_free(h[0]);
+      else x.def_free(h[0]);
+      --wm.n;
     });
   }
   return wm.x;
@@ -153,27 +155,55 @@ const wx = (): WasmCore => {
 // (WebAssembly memory can grow but never shrink).
 const wbig = (n: number) => n > 16777216 ? (wx(), new WebAssembly.Instance(wm, {}).exports as unknown as WasmCore) : wx();
 
+// Drops the shared instance once its memory has grown large and no stream
+// state lives in it; the next call starts a fresh, small instance.
+const wrel = (x: WasmCore) => {
+  if (x == wm.x && !wm.n && x.memory.buffer.byteLength > 67108864) wm.x = null;
+}
+
 // copy one or two arrays into the WebAssembly scratch buffer
 const wput = (x: WasmCore, a: Uint8Array, b?: Uint8Array) => {
   const al = a.length, n = al + (b ? b.length : 0);
-  const ptr = x.buf(n), m = new u8(x.memory.buffer, ptr, n);
+  const ptr = x.buf(n) >>> 0;
+  if (!ptr) err(99, 'out of memory');
+  const m = new u8(x.memory.buffer, ptr, n);
   m.set(a);
   if (b) m.set(b, al);
 }
 
 // copy WebAssembly output into a new array with pre/post padding
 const wget = (x: WasmCore, p: number, pre: number, post: number) => {
-  if (!p) err(x.err());
+  p >>>= 0;
+  if (!p) wer(x);
   const n = x.out_len(), o = new u8(pre + n + post);
   o.set(new u8(x.memory.buffer, p, n), pre);
   return o;
 }
 
-const wreg = (o: object, h: number) => {
-  if (wm.r) wm.r.register(o, h, o);
+// throws the engine's error (99: out of memory)
+const wer = (x: WasmCore) => {
+  const e = x.err();
+  err(e, e == 99 && 'out of memory');
+}
+
+// tracks stream state for cleanup
+const wreg = (o: object, h: number, k: number) => {
+  wm.n = (wm.n || 0) + 1;
+  if (wm.r) wm.r.register(o, [h, k], o);
 }
 const wunreg = (o: object) => {
+  --wm.n;
   if (wm.r) wm.r.unregister(o);
+}
+
+// frees an Inflate stream's state
+const ifr = (o: unknown) => {
+  const s = o as { h: number };
+  if (s.h) {
+    const x = wx();
+    x.inf_free(s.h), wunreg(s), s.h = 0;
+    wrel(x);
+  }
 }
 
 // concatenate
@@ -218,7 +248,8 @@ const icp = (dat: Uint8Array, e: number, o: Uint8Array, k: number) => {
 
 // one-shot inflate. out: buffer to fill (truncates), sz: known output size (truncates)
 const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number) => {
-  if (!dat.length || (out && !out.length) || sz === 0) return out || new u8(0);
+  if (!dat.length || (out && !out.length)) return out || new u8(0);
+  if (sz === 0 && !out) return new u8(0);
   const cap = out ? out.length : sz || 0, x = wbig(Math.max(dat.length, cap));
   const [p, n, f] = dat[0] & 6 ? [0, 0, 0] : isc(dat);
   let d = dict ? dict.subarray(-32768) : et;
@@ -233,10 +264,11 @@ const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number
     d = h.length < 32768 && d.length ? cat(d.subarray(h.length - 32768), h) : h;
   }
   wput(x, d, p ? dat.subarray(p) : dat);
-  const q = x.inflate_once(d.length, dat.length - p, cap ? cap - n : 0, 0);
-  if (!q) err(x.err());
+  const q = x.inflate_once(d.length, dat.length - p, cap ? cap - n : 0, 0) >>> 0;
+  if (!q) wer(x);
   const t = x.out_len(), o = out || new u8(n + t);
   o.set(new u8(x.memory.buffer, q, t), n);
+  wrel(x);
   if (p) icp(dat, p, o, 0);
   return out ? out.subarray(0, n + t) : o;
 }
@@ -269,8 +301,11 @@ const crc = (): CRCV => {
         c = ~cr;
       } else {
         const x = wx();
-        wput(x, d);
-        c = x.crc32(c, d.length);
+        for (let i = 0; i < d.length; i += 1048576) {
+          const e = d.subarray(i, i + 1048576);
+          wput(x, e);
+          c = x.crc32(c, e.length);
+        }
       }
     },
     d() { return c; }
@@ -294,8 +329,12 @@ const adler = (): CRCV => {
         a = n, b = m;
       } else {
         const x = wx();
-        wput(x, d);
-        const v = x.adler32(((b % 65521) << 16) | (a % 65521), d.length);
+        let v = ((b % 65521) << 16) | (a % 65521);
+        for (let i = 0; i < d.length; i += 1048576) {
+          const e = d.subarray(i, i + 1048576);
+          wput(x, e);
+          v = x.adler32(v, e.length);
+        }
         a = v & 65535, b = v >>> 16;
       }
     },
@@ -512,6 +551,7 @@ const dopt = (dat: Uint8Array, opt: DeflateOptions, pre: number, post: number, m
   wput(x, dict, dat);
   const r = wget(x, x.deflate_once(opt.level == null ? 6 : opt.level, opt.mem == null ? -1 : opt.mem, mode || 0, dict.length, dat.length), pre, post);
   if (ck) ck[0] = x.last_check();
+  wrel(x);
   return r;
 }
   
@@ -590,17 +630,17 @@ const wrkr = <T, R>(fns: (() => unknown[])[], init: (ev: MessageEvent<T>) => voi
 }
 
 // base async inflate fn
-const bInflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wput, wget, wreg, wunreg, cat, isc, icp, inflt, inflateSync, pbf, gopt];
-const bDflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wput, wget, wreg, wunreg, dopt, deflateSync, pbf];
+const bInflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wrel, wput, wget, wer, wreg, wunreg, ifr, cat, isc, icp, inflt, inflateSync, pbf, gopt];
+const bDflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wrel, wput, wget, wer, wreg, wunreg, dopt, deflateSync, pbf];
 
 // gzip extra
 const gze = () => [gzh, gzhl, wbytes, crc, crct];
 // gunzip extra
-const guze = () => [gzs, gzl, cat];
+const guze = () => [gzs, gzl, cat, ifr];
 // zlib extra
 const zle = () => [zlh, wbytes, adler, bsw];
 // unzlib extra
-const zule = () => [zls, cat];
+const zule = () => [zls, cat, ifr];
 
 // post buf
 const pbf = (msg: Uint8Array) => (postMessage as Worker['postMessage'])(msg, [msg.buffer]);
@@ -767,11 +807,14 @@ export class Deflate {
   constructor(opts?: DeflateOptions | FlateStreamHandler, cb?: FlateStreamHandler) {
     if (typeof opts == 'function') cb = opts as FlateStreamHandler, opts = {};
     this.ondata = cb;
-    this.o = (opts as DeflateOptions) || {};
+    const o = this.o = (opts as DeflateOptions) || {};
+    this.y = o.dictionary ? slc(o.dictionary.subarray(-32768), 0) : et;
     this.h = 0;
     this.l = 0;
   }
   private o: DeflateOptions;
+  // dictionary (copied)
+  private y: Uint8Array;
   // WebAssembly stream handle
   private h: number;
   // finished
@@ -790,19 +833,36 @@ export class Deflate {
     if (this.l) err(4);
     const x = wx();
     if (!this.h) {
-      const o = this.o, dict = o.dictionary ? o.dictionary.subarray(-32768) : et;
-      wput(x, dict);
-      this.h = x.def_new(o.level == null ? 6 : o.level, o.mem == null ? -1 : o.mem, m, dict.length);
-      wreg(this, this.h);
+      const o = this.o;
+      wput(x, this.y);
+      this.h = x.def_new(o.level == null ? 6 : o.level, o.mem == null ? -1 : o.mem, m, this.y.length) >>> 0;
+      wreg(this, this.h, 0);
     }
-    wput(x, c);
-    const p = x.def_push(this.h, c.length, f);
-    if (!x.out_len() && f < 2) return null;
-    const r = wget(x, p, pre, post);
+    // large chunks go through in slices to bound WebAssembly memory growth
+    const parts: Uint8Array[] = [];
+    let n = 0, r: Uint8Array<ArrayBuffer> = null;
+    for (let i = 0, e = 0; ; i = e) {
+      e = Math.min(i + 1048576, c.length);
+      const last = e == c.length;
+      wput(x, c.subarray(i, e));
+      const p = x.def_push(this.h, e - i, last ? f : 0) >>> 0, k = x.out_len();
+      if (!p) wer(x);
+      if (last && !parts.length) {
+        if (k || f > 1) r = wget(x, p, pre, post);
+        break;
+      }
+      if (k) parts.push(new u8(x.memory.buffer, p, k).slice()), n += k;
+      if (last) {
+        r = new u8(pre + n + post);
+        for (let j = 0, w = pre; j < parts.length; w += parts[j++].length) r.set(parts[j], w);
+        break;
+      }
+    }
     if (f == 3) {
       this.k = x.def_check(this.h);
       x.def_free(this.h), wunreg(this);
       this.h = 0, this.l = 1;
+      wrel(x);
     }
     return r;
   }
@@ -813,7 +873,7 @@ export class Deflate {
    * @param final Whether this is the last chunk
    */
   push(chunk: Uint8Array, final?: boolean) {
-    const r = (Deflate.prototype as unknown as { q: Deflate['q'] }).q.call(this, chunk, final ? 3 : 0, 0, 0, 0);
+    const r = this.q(chunk, final ? 3 : 0, 0, 0, 0);
     if (r) this.ondata(r, !!final);
   }
 
@@ -826,7 +886,7 @@ export class Deflate {
    *             with the current output after a sync flush.
    */
   flush(sync?: boolean) {
-    const r = (Deflate.prototype as unknown as { q: Deflate['q'] }).q.call(this, et, sync ? 2 : 1, 0, 0, 0);
+    const r = this.q(et, sync ? 2 : 1, 0, 0, 0);
     if (r) this.ondata(r, false);
   }
 }
@@ -966,13 +1026,8 @@ export class Inflate {
     if (typeof opts == 'function') cb = opts as FlateStreamHandler, opts = {};
     this.ondata = cb;
     const dict = opts && (opts as InflateStreamOptions).dictionary;
-    this.x = dict ? dict.subarray(-32768) : et;
+    this.x = dict ? slc(dict.subarray(-32768), 0) : et;
     this.h = this.f = this.t = this.n = 0;
-  }
-
-  // frees the WebAssembly state
-  private k() {
-    if (this.h) wx().inf_free(this.h), wunreg(this), this.h = 0;
   }
 
   // inflates a chunk of raw DEFLATE data
@@ -984,21 +1039,38 @@ export class Inflate {
     const x = wx();
     if (!this.h) {
       wput(x, this.x);
-      this.h = x.inf_new(this.x.length);
-      wreg(this, -this.h);
+      this.h = x.inf_new(this.x.length) >>> 0;
+      wreg(this, this.h, 1);
     }
-    this.n += c.length;
-    wput(x, c);
-    const p = x.inf_push(this.h, c.length, final && this.n ? 1 : 0);
-    if (!p) {
-      const e = x.err();
-      (Inflate.prototype as unknown as { k: Inflate['k'] }).k.call(this);
-      err(e);
+    // large chunks go through in slices to bound WebAssembly memory growth
+    const parts: Uint8Array<ArrayBuffer>[] = [];
+    for (let i = 0, e = 0; ; i = e) {
+      e = Math.min(i + 1048576, c.length);
+      const last = e == c.length;
+      this.n += e - i;
+      wput(x, c.subarray(i, e));
+      const p = x.inf_push(this.h, e - i, last && final && this.n ? 1 : 0) >>> 0;
+      if (!p) {
+        const er = x.err();
+        ifr(this);
+        err(er, er == 99 && 'out of memory');
+      }
+      parts.push(wget(x, p, 0, 0));
+      if (x.inf_ended(this.h)) {
+        this.f = 1, this.t = c.length - i - x.consumed();
+        break;
+      }
+      if (last) {
+        this.t = 0;
+        break;
+      }
     }
-    const o = wget(x, p, 0, 0);
-    this.t = c.length - x.consumed();
-    if (x.inf_ended(this.h)) this.f = 1;
-    if (this.f || final) (Inflate.prototype as unknown as { k: Inflate['k'] }).k.call(this);
+    if (this.f || final) ifr(this);
+    if (parts.length == 1) return parts[0];
+    let n = 0;
+    for (let j = 0; j < parts.length; ++j) n += parts[j].length;
+    const o = new u8(n);
+    for (let j = 0, w = 0; j < parts.length; w += parts[j++].length) o.set(parts[j], w);
     return o;
   }
 
@@ -1011,7 +1083,7 @@ export class Inflate {
     if (!this.ondata) err(5);
     if (this.d) err(4);
     this.d = !!final;
-    this.ondata((Inflate.prototype as unknown as { r: Inflate['r'] }).r.call(this, chunk, final), !!final);
+    this.ondata(this.r(chunk, final), !!final);
   }
 }
 
@@ -1146,7 +1218,7 @@ export class Gzip {
    * @param final Whether this is the last chunk
    */
   push(chunk: Uint8Array, final?: boolean) {
-    (Gzip.prototype as unknown as { p: Gzip['p'] }).p.call(this, chunk, final ? 3 : 0);
+    this.p(chunk, final ? 3 : 0);
     this.z += chunk.length;
   }
 
@@ -1168,7 +1240,7 @@ export class Gzip {
    *             decompressible.
    */
   flush(sync?: boolean) {
-    (Gzip.prototype as unknown as { p: Gzip['p'] }).p.call(this, et, sync ? 2 : 1);
+    this.p(et, sync ? 2 : 1);
   }
 }
 
@@ -1333,41 +1405,50 @@ export class Gunzip {
     if (this.d) err(4);
     this.d = !!final;
     this.r += chunk.length;
-    let p = this.p.length ? cat(this.p, chunk) : chunk;
-    const outs: Uint8Array<ArrayBuffer>[] = [];
-    for (;;) {
-      if (this.v) {
-        if (!p.length) break;
-        const s = p.length > 3 ? gzs(p) : 4;
-        if (s > p.length) {
-          if (final) p = et;
-          break;
+    let p = this.p.length ? cat(this.p, chunk) : chunk, pend: Uint8Array<ArrayBuffer> = null;
+    // the newest output is held back so the last one can carry the final flag
+    const emit = (o: Uint8Array<ArrayBuffer>) => {
+      if (pend && pend.length) this.ondata(pend, false);
+      pend = o;
+    };
+    try {
+      for (;;) {
+        if (this.v) {
+          if (!p.length) break;
+          const s = p.length > 3 ? gzs(p) : 4;
+          if (s > p.length) {
+            if (final) p = et;
+            break;
+          }
+          if (this.m++ && this.onmember) emit(null), this.onmember(this.r - p.length);
+          p = p.subarray(s);
+          this.v = this.f = this.n = 0;
         }
-        if (this.m++ && this.onmember) this.onmember(this.r - p.length);
-        p = p.subarray(s);
-        this.v = this.f = this.n = 0;
+        if (this.f) {
+          // skip the CRC32 and ISIZE trailer, then look for another member
+          if (p.length < 8) break;
+          p = p.subarray(8);
+          this.v = 1;
+          continue;
+        }
+        if (!p.length) break;
+        emit((Inflate.prototype as unknown as { r: (c: Uint8Array, f: number) => Uint8Array<ArrayBuffer> }).r.call(this, p, 0));
+        p = p.subarray(p.length - this.t);
+        if (!this.f) break;
       }
-      if (this.f) {
-        // skip the CRC32 and ISIZE trailer, then look for another member
-        if (p.length < 8) break;
-        p = p.subarray(8);
-        this.v = 1;
-        continue;
+      if (final) {
+        const unfinished = !this.v && !this.f && this.n;
+        ifr(this);
+        if (unfinished) err(0);
       }
-      if (!p.length) break;
-      outs.push((Inflate.prototype as unknown as { r: (c: Uint8Array, f: number) => Uint8Array }).r.call(this, p, 0));
-      p = p.subarray(p.length - this.t);
-      if (!this.f) break;
+    } catch (e) {
+      // deliver what was decoded before the error, as fflate does
+      emit(null);
+      throw e;
     }
-    if (final) {
-      const unfinished = !this.v && !this.f && this.n;
-      (Inflate.prototype as unknown as { k: () => void }).k.call(this);
-      if (unfinished) err(0);
-      this.p = et;
-    } else this.p = p.length ? slc(p, 0) : et;
-    const last = final ? (outs.length ? outs.pop() : new u8(0)) : null;
-    for (let i = 0; i < outs.length; ++i) if (outs[i].length) this.ondata(outs[i], false);
-    if (last) this.ondata(last, true);
+    this.p = final ? et : p.length ? slc(p, 0) : et;
+    if (final) this.ondata(pend || new u8(0), true);
+    else if (pend && pend.length) this.ondata(pend, false);
   }
 }
 
@@ -1510,7 +1591,7 @@ export class Zlib {
    * @param final Whether this is the last chunk
    */
   push(chunk: Uint8Array, final?: boolean) {
-    (Zlib.prototype as unknown as { p: Zlib['p'] }).p.call(this, chunk, final ? 3 : 0);
+    this.p(chunk, final ? 3 : 0);
   }
 
   private p(c: Uint8Array, f: number) {
@@ -1531,7 +1612,7 @@ export class Zlib {
    *             decompressible.
    */
   flush(sync?: boolean) {
-    (Zlib.prototype as unknown as { p: Zlib['p'] }).p.call(this, et, sync ? 2 : 1);
+    this.p(et, sync ? 2 : 1);
   }
 }
 
@@ -1691,7 +1772,7 @@ export class Unzlib {
       p = p.subarray(zls(p, this.v - 1)), this.v = 0, this.p = et;
     }
     this.d = !!final;
-    const o = (Inflate.prototype as unknown as { r: (c: Uint8Array, f: boolean) => Uint8Array }).r.call(this, p, final);
+    const o = (Inflate.prototype as unknown as { r: (c: Uint8Array, f: boolean) => Uint8Array<ArrayBuffer> }).r.call(this, p, final);
     if (this.f) this.z += this.t;
     if (final && this.z < 4) err(6, 'invalid zlib data');
     this.ondata(o, !!final);

@@ -40,7 +40,7 @@ const wbd = (s: string) => {
 // cleanup registry live on the module object rather than in free variables: the
 // clone drops them, so each worker instantiates its own, and minifiers cannot
 // rewrite an existence check into a reference to an undeclared worker variable.
-type WasmModule = WebAssembly.Module & { x?: WasmCore, r?: FinalizationRegistry<number> | false };
+type WasmModule = WebAssembly.Module & { x?: WasmCore, r?: FinalizationRegistry<number[]> | false, n?: number };
 let wm: WasmModule;
 
 // get the WebAssembly exports, instantiating on first use
@@ -48,10 +48,12 @@ const wx = (): WasmCore => {
   if (!wm) wm = new WebAssembly.Module(wbd(wsrc));
   if (!wm.x) {
     const x = wm.x = new WebAssembly.Instance(wm, {}).exports as unknown as WasmCore;
-    // frees stream state that was never finished (positive: deflate, negative: inflate)
-    wm.r = typeof FinalizationRegistry != 'undefined' && new FinalizationRegistry((h: number) => {
-      if (h > 0) x.def_free(h);
-      else x.inf_free(-h);
+    // frees stream state that was never finished ([handle, 0 deflate / 1 inflate])
+    wm.n = 0;
+    wm.r = typeof FinalizationRegistry != 'undefined' && new FinalizationRegistry((h: number[]) => {
+      if (h[1]) x.inf_free(h[0]);
+      else x.def_free(h[0]);
+      --wm.n;
     });
   }
   return wm.x;
@@ -62,27 +64,55 @@ const wx = (): WasmCore => {
 // (WebAssembly memory can grow but never shrink).
 const wbig = (n: number) => n > 16777216 ? (wx(), new WebAssembly.Instance(wm, {}).exports as unknown as WasmCore) : wx();
 
+// Drops the shared instance once its memory has grown large and no stream
+// state lives in it; the next call starts a fresh, small instance.
+const wrel = (x: WasmCore) => {
+  if (x == wm.x && !wm.n && x.memory.buffer.byteLength > 67108864) wm.x = null;
+}
+
 // copy one or two arrays into the WebAssembly scratch buffer
 const wput = (x: WasmCore, a: Uint8Array, b?: Uint8Array) => {
   const al = a.length, n = al + (b ? b.length : 0);
-  const ptr = x.buf(n), m = new u8(x.memory.buffer, ptr, n);
+  const ptr = x.buf(n) >>> 0;
+  if (!ptr) err(99, 'out of memory');
+  const m = new u8(x.memory.buffer, ptr, n);
   m.set(a);
   if (b) m.set(b, al);
 }
 
 // copy WebAssembly output into a new array with pre/post padding
 const wget = (x: WasmCore, p: number, pre: number, post: number) => {
-  if (!p) err(x.err());
+  p >>>= 0;
+  if (!p) wer(x);
   const n = x.out_len(), o = new u8(pre + n + post);
   o.set(new u8(x.memory.buffer, p, n), pre);
   return o;
 }
 
-const wreg = (o: object, h: number) => {
-  if (wm.r) wm.r.register(o, h, o);
+// throws the engine's error (99: out of memory)
+const wer = (x: WasmCore) => {
+  const e = x.err();
+  err(e, e == 99 && 'out of memory');
+}
+
+// tracks stream state for cleanup
+const wreg = (o: object, h: number, k: number) => {
+  wm.n = (wm.n || 0) + 1;
+  if (wm.r) wm.r.register(o, [h, k], o);
 }
 const wunreg = (o: object) => {
+  --wm.n;
   if (wm.r) wm.r.unregister(o);
+}
+
+// frees an Inflate stream's state
+const ifr = (o: unknown) => {
+  const s = o as { h: number };
+  if (s.h) {
+    const x = wx();
+    x.inf_free(s.h), wunreg(s), s.h = 0;
+    wrel(x);
+  }
 }
 
 // concatenate
@@ -127,7 +157,8 @@ const icp = (dat: Uint8Array, e: number, o: Uint8Array, k: number) => {
 
 // one-shot inflate. out: buffer to fill (truncates), sz: known output size (truncates)
 const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number) => {
-  if (!dat.length || (out && !out.length) || sz === 0) return out || new u8(0);
+  if (!dat.length || (out && !out.length)) return out || new u8(0);
+  if (sz === 0 && !out) return new u8(0);
   const cap = out ? out.length : sz || 0, x = wbig(Math.max(dat.length, cap));
   const [p, n, f] = dat[0] & 6 ? [0, 0, 0] : isc(dat);
   let d = dict ? dict.subarray(-32768) : et;
@@ -142,10 +173,11 @@ const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number
     d = h.length < 32768 && d.length ? cat(d.subarray(h.length - 32768), h) : h;
   }
   wput(x, d, p ? dat.subarray(p) : dat);
-  const q = x.inflate_once(d.length, dat.length - p, cap ? cap - n : 0, 0);
-  if (!q) err(x.err());
+  const q = x.inflate_once(d.length, dat.length - p, cap ? cap - n : 0, 0) >>> 0;
+  if (!q) wer(x);
   const t = x.out_len(), o = out || new u8(n + t);
   o.set(new u8(x.memory.buffer, q, t), n);
+  wrel(x);
   if (p) icp(dat, p, o, 0);
   return out ? out.subarray(0, n + t) : o;
 }
