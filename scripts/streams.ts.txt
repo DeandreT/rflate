@@ -328,8 +328,12 @@ export class Gunzip {
     let p = this.p.length ? cat(this.p, chunk) : chunk, pend: Uint8Array<ArrayBuffer> = null;
     // the newest output is held back so the last one can carry the final flag
     const emit = (o: Uint8Array<ArrayBuffer>) => {
-      if (pend && pend.length) this.ondata(pend, false);
+      const q = pend;
       pend = o;
+      if (q && q.length) {
+        // if the handler throws, stop delivering, as fflate does
+        try { this.ondata(q, false); } catch (e) { pend = null; throw e; }
+      }
     };
     try {
       for (;;) {

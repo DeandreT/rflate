@@ -161,3 +161,27 @@ test('chunks larger than the 1 MiB slice size', () => {
     same(runStream(r[D], null, [c]), data, D);
   }
 });
+
+test('a throwing ondata does not receive a chunk twice', () => {
+  const all = concat([r.gzipSync(text(3000)), r.gzipSync(text(3000))]);
+  let calls = 0;
+  const g = new r.Gunzip(() => { calls++; throw new Error('downstream'); });
+  assert.throws(() => g.push(all, true), /downstream/);
+  assert.equal(calls, 1);
+});
+
+test('streams keep working after the shared instance is replaced', () => {
+  // ~200 MiB of zeros from a small input grows the shared instance past 64 MiB
+  const bomb = r.deflateSync(new Uint8Array(200 << 20), { level: 9 });
+  assert.ok(bomb.length < 1 << 20);
+  assert.equal(r.inflateSync(bomb).length, 200 << 20);
+  const data = text(100000);
+  same(runStream(r.Inflate, null, chunks(r.deflateSync(data))), data);
+  // a stream that is open across a large one-shot call keeps its state
+  const out = [];
+  const s = new r.Deflate(d => out.push(d));
+  s.push(data.subarray(0, 50000));
+  assert.equal(r.inflateSync(bomb).length, 200 << 20);
+  s.push(data.subarray(50000), true);
+  same(r.inflateSync(concat(out)), data);
+});

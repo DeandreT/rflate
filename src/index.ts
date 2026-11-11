@@ -252,20 +252,32 @@ const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number
   if (sz === 0 && !out) return new u8(0);
   const cap = out ? out.length : sz || 0, x = wbig(Math.max(dat.length, cap));
   const [p, n, f] = dat[0] & 6 ? [0, 0, 0] : isc(dat);
-  let d = dict ? dict.subarray(-32768) : et;
+  const rest = p ? dat.subarray(p) : dat, lim = cap ? cap - n : 0;
+  let q = 0;
   if (p) {
     if (f || (cap && n >= cap)) {
       const o = out || new u8(cap ? Math.min(n, cap) : n), w = icp(dat, p, o, 0);
       return out ? out.subarray(0, w) : o;
     }
-    // the rest of the stream may refer back into the stored data
-    const h = new u8(Math.min(n, 32768));
-    icp(dat, p, h, n - h.length);
-    d = h.length < 32768 && d.length ? cat(d.subarray(h.length - 32768), h) : h;
+    // The blocks after the stored data rarely refer back into it, so try them
+    // without history first; a reference that needs it fails with code 3.
+    if (!dict) {
+      wput(x, et, rest);
+      q = x.inflate_once(0, rest.length, lim, 0) >>> 0;
+      if (!q && x.err() != 3) wrel(x), wer(x);
+    }
   }
-  wput(x, d, p ? dat.subarray(p) : dat);
-  const q = x.inflate_once(d.length, dat.length - p, cap ? cap - n : 0, 0) >>> 0;
-  if (!q) wer(x);
+  if (!q) {
+    let d = dict ? dict.subarray(-32768) : et;
+    if (p) {
+      const h = new u8(Math.min(n, 32768));
+      icp(dat, p, h, n - h.length);
+      d = h.length < 32768 && d.length ? cat(d.subarray(h.length - 32768), h) : h;
+    }
+    wput(x, d, rest);
+    q = x.inflate_once(d.length, rest.length, lim, 0) >>> 0;
+    if (!q) wrel(x), wer(x);
+  }
   const t = x.out_len(), o = out || new u8(n + t);
   o.set(new u8(x.memory.buffer, q, t), n);
   wrel(x);
@@ -549,7 +561,9 @@ export interface AsyncTerminable {
 const dopt = (dat: Uint8Array, opt: DeflateOptions, pre: number, post: number, mode?: number, ck?: number[]) => {
   const x = wbig(dat.length), dict = opt.dictionary ? opt.dictionary.subarray(-32768) : et;
   wput(x, dict, dat);
-  const r = wget(x, x.deflate_once(opt.level == null ? 6 : opt.level, opt.mem == null ? -1 : opt.mem, mode || 0, dict.length, dat.length), pre, post);
+  const q = x.deflate_once(opt.level == null ? 6 : opt.level, opt.mem == null ? -1 : opt.mem, mode || 0, dict.length, dat.length);
+  if (!q) wrel(x), wer(x);
+  const r = wget(x, q, pre, post);
   if (ck) ck[0] = x.last_check();
   wrel(x);
   return r;
@@ -1408,8 +1422,12 @@ export class Gunzip {
     let p = this.p.length ? cat(this.p, chunk) : chunk, pend: Uint8Array<ArrayBuffer> = null;
     // the newest output is held back so the last one can carry the final flag
     const emit = (o: Uint8Array<ArrayBuffer>) => {
-      if (pend && pend.length) this.ondata(pend, false);
+      const q = pend;
       pend = o;
+      if (q && q.length) {
+        // if the handler throws, stop delivering, as fflate does
+        try { this.ondata(q, false); } catch (e) { pend = null; throw e; }
+      }
     };
     try {
       for (;;) {

@@ -134,7 +134,9 @@ dopt = '''// deflate with opts. mode 1/2 also computes the CRC32/Adler32 of dat 
 const dopt = (dat: Uint8Array, opt: DeflateOptions, pre: number, post: number, mode?: number, ck?: number[]) => {
   const x = wbig(dat.length), dict = opt.dictionary ? opt.dictionary.subarray(-32768) : et;
   wput(x, dict, dat);
-  const r = wget(x, x.deflate_once(opt.level == null ? 6 : opt.level, opt.mem == null ? -1 : opt.mem, mode || 0, dict.length, dat.length), pre, post);
+  const q = x.deflate_once(opt.level == null ? 6 : opt.level, opt.mem == null ? -1 : opt.mem, mode || 0, dict.length, dat.length);
+  if (!q) wrel(x), wer(x);
+  const r = wget(x, q, pre, post);
   if (ck) ck[0] = x.last_check();
   wrel(x);
   return r;
