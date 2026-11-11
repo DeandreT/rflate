@@ -1,0 +1,98 @@
+{
+  "name": "rflate",
+  "version": "0.1.0",
+  "description": "fflate's API with a Rust/WebAssembly DEFLATE engine: (de)compression for GZIP, Zlib, raw DEFLATE and ZIP",
+  "main": "./lib/index.cjs",
+  "module": "./esm/browser.js",
+  "types": "./lib/index.d.ts",
+  "unpkg": "./umd/index.js",
+  "jsdelivr": "./umd/index.js",
+  "browser": {
+    "./lib/node-worker.cjs": "./lib/worker.cjs"
+  },
+  "exports": {
+    ".": {
+      "node": {
+        "import": {
+          "types": "./esm/index.d.mts",
+          "default": "./esm/index.mjs"
+        },
+        "require": {
+          "types": "./lib/node.d.cts",
+          "default": "./lib/node.cjs"
+        }
+      },
+      "import": {
+        "types": "./esm/browser.d.ts",
+        "default": "./esm/browser.js"
+      },
+      "require": {
+        "types": "./lib/browser.d.cts",
+        "default": "./lib/browser.cjs"
+      }
+    },
+    "./node": {
+      "import": {
+        "types": "./esm/index.d.mts",
+        "default": "./esm/index.mjs"
+      },
+      "require": {
+        "types": "./lib/node.d.cts",
+        "default": "./lib/node.cjs"
+      }
+    },
+    "./browser": {
+      "import": {
+        "types": "./esm/browser.d.ts",
+        "default": "./esm/browser.js"
+      },
+      "require": {
+        "types": "./lib/browser.d.cts",
+        "default": "./lib/browser.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "files": [
+    "lib",
+    "esm",
+    "umd"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DeandreT/rflate.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DeandreT/rflate/issues"
+  },
+  "homepage": "https://github.com/DeandreT/rflate",
+  "author": "Deandre Thomas",
+  "license": "MIT",
+  "keywords": [
+    "gzip",
+    "gunzip",
+    "deflate",
+    "inflate",
+    "compression",
+    "decompression",
+    "zlib",
+    "zip",
+    "unzip",
+    "webassembly",
+    "wasm",
+    "rust",
+    "fflate"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --expose-gc --test --test-concurrency=1 test/*.test.mjs",
+    "bench": "node --expose-gc bench/run.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "fflate": "0.8.3",
+    "terser": "^5.47.1",
+    "typescript": "^6.0.3"
+  }
+}

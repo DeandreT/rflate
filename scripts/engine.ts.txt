@@ -1,0 +1,96 @@
+// The DEFLATE engine is Rust (zlib-rs) compiled to WebAssembly. The module is
+// embedded as base64 at build time and instantiated synchronously on first use.
+const wsrc = '__RFLATE_WASM__';
+
+interface WasmCore {
+  memory: WebAssembly.Memory;
+  buf(len: number): number;
+  out_len(): number;
+  consumed(): number;
+  err(): number;
+  crc32(start: number, len: number): number;
+  adler32(start: number, len: number): number;
+  deflate_once(level: number, mem: number, mode: number, dictLen: number, len: number): number;
+  last_check(): number;
+  def_new(level: number, mem: number, mode: number, dictLen: number): number;
+  def_push(h: number, len: number, flush: number): number;
+  def_check(h: number): number;
+  def_free(h: number): void;
+  inf_new(dictLen: number): number;
+  inf_push(h: number, len: number, final: number): number;
+  inf_ended(h: number): number;
+  inf_free(h: number): void;
+  inflate_once(dictLen: number, len: number, size: number, hint: number): number;
+}
+
+// empty
+const et = /*#__PURE__*/ new u8(0);
+
+// base64 decode
+const wbd = (s: string) => {
+  if (typeof atob == 'function') {
+    const b = atob(s), o = new u8(b.length);
+    for (let i = 0; i < b.length; ++i) o[i] = b.charCodeAt(i);
+    return o;
+  }
+  return new u8(Buffer.from(s, 'base64'));
+}
+
+// compiled module (sent to workers), instance exports
+let wm: WebAssembly.Module;
+let wq: WasmCore;
+
+// get the WebAssembly exports, instantiating on first use
+const wx = (): WasmCore => (typeof wq != 'undefined' && wq) ||
+  (wq = new WebAssembly.Instance(wm || (wm = new WebAssembly.Module(wbd(wsrc))), {}).exports as unknown as WasmCore);
+
+// copy one or two arrays into the WebAssembly scratch buffer
+const wput = (x: WasmCore, a: Uint8Array, b?: Uint8Array) => {
+  const al = a.length, n = al + (b ? b.length : 0);
+  const ptr = x.buf(n), m = new u8(x.memory.buffer, ptr, n);
+  m.set(a);
+  if (b) m.set(b, al);
+}
+
+// copy WebAssembly output into a new array with pre/post padding
+const wget = (x: WasmCore, p: number, pre: number, post: number) => {
+  if (!p) err(x.err());
+  const n = x.out_len(), o = new u8(pre + n + post);
+  o.set(new u8(x.memory.buffer, p, n), pre);
+  return o;
+}
+
+// frees stream state that was never finished (positive: deflate, negative: inflate)
+const wfr = typeof FinalizationRegistry != 'undefined' && /*#__PURE__*/ new FinalizationRegistry((h: number) => {
+  if (h > 0) wx().def_free(h);
+  else wx().inf_free(-h);
+});
+const wreg = (o: object, h: number) => {
+  if (typeof wfr != 'undefined' && wfr) wfr.register(o, h, o);
+}
+const wunreg = (o: object) => {
+  if (typeof wfr != 'undefined' && wfr) wfr.unregister(o);
+}
+
+// concatenate
+const cat = (a: Uint8Array, b: Uint8Array) => {
+  const n = new u8(a.length + b.length);
+  n.set(a), n.set(b, a.length);
+  return n;
+}
+
+// byte swap (big-endian Adler-32 written with wbytes)
+const bsw = (v: number) => (v & 255) << 24 | (v & 0xFF00) << 8 | (v >>> 8 & 0xFF00) | (v >>> 24);
+
+// one-shot inflate. out: buffer to fill (truncates), sz: known output size (truncates)
+const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number) => {
+  if (!dat.length || (out && !out.length) || sz === 0) return out || new u8(0);
+  const x = wx(), d = dict ? dict.subarray(-32768) : et;
+  wput(x, d, dat);
+  const p = x.inflate_once(d.length, dat.length, out ? out.length : sz || 0, 0);
+  if (!out) return wget(x, p, 0, 0);
+  if (!p) err(x.err());
+  const n = x.out_len();
+  out.set(new u8(x.memory.buffer, p, n));
+  return out.subarray(0, n);
+}

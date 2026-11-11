@@ -1,0 +1,467 @@
+//@@DEFLATE
+/**
+ * Streaming DEFLATE compression
+ */
+export class Deflate {
+  /**
+   * Creates a DEFLATE stream
+   * @param opts The compression options
+   * @param cb The callback to call whenever data is deflated
+   */
+  constructor(opts: DeflateOptions, cb?: FlateStreamHandler);
+  /**
+   * Creates a DEFLATE stream
+   * @param cb The callback to call whenever data is deflated
+   */
+  constructor(cb?: FlateStreamHandler);
+  constructor(opts?: DeflateOptions | FlateStreamHandler, cb?: FlateStreamHandler) {
+    if (typeof opts == 'function') cb = opts as FlateStreamHandler, opts = {};
+    this.ondata = cb;
+    this.o = (opts as DeflateOptions) || {};
+    this.h = 0;
+    this.l = 0;
+  }
+  private o: DeflateOptions;
+  // WebAssembly stream handle
+  private h: number;
+  // finished
+  private l: number;
+  // checksum of the input once finished
+  private k: number;
+  /**
+   * The handler to call whenever data is available
+   */
+  ondata: FlateStreamHandler;
+
+  // compresses a chunk. f: 0 none, 1 block flush, 2 sync flush, 3 finish
+  // m: checksum mode. Returns null when no output is available yet.
+  private q(c: Uint8Array, f: number, m: number, pre: number, post: number) {
+    if (!this.ondata) err(5);
+    if (this.l) err(4);
+    const x = wx();
+    if (!this.h) {
+      const o = this.o, dict = o.dictionary ? o.dictionary.subarray(-32768) : et;
+      wput(x, dict);
+      this.h = x.def_new(o.level == null ? 6 : o.level, o.mem == null ? -1 : o.mem, m, dict.length);
+      wreg(this, this.h);
+    }
+    wput(x, c);
+    const p = x.def_push(this.h, c.length, f);
+    if (!x.out_len() && f < 2) return null;
+    const r = wget(x, p, pre, post);
+    if (f == 3) {
+      this.k = x.def_check(this.h);
+      x.def_free(this.h), wunreg(this);
+      this.h = 0, this.l = 1;
+    }
+    return r;
+  }
+
+  /**
+   * Pushes a chunk to be deflated
+   * @param chunk The chunk to push
+   * @param final Whether this is the last chunk
+   */
+  push(chunk: Uint8Array, final?: boolean) {
+    const r = (Deflate.prototype as unknown as { q: Deflate['q'] }).q.call(this, chunk, final ? 3 : 0, 0, 0, 0);
+    if (r) this.ondata(r, !!final);
+  }
+
+  /**
+   * Flushes buffered uncompressed data. Useful to immediately retrieve the
+   * deflated output for small inputs.
+   * @param sync Whether to flush to a byte boundary. A sync flush takes 4-5
+   *             extra bytes, but guarantees all pushed data is immediately
+   *             decompressible. A separate DEFLATE stream may be concatenated
+   *             with the current output after a sync flush.
+   */
+  flush(sync?: boolean) {
+    const r = (Deflate.prototype as unknown as { q: Deflate['q'] }).q.call(this, et, sync ? 2 : 1, 0, 0, 0);
+    if (r) this.ondata(r, false);
+  }
+}
+//@@DEFLATESYNC
+export function deflateSync(data: Uint8Array, opts?: DeflateOptions) {
+  return dopt(data, opts || {}, 0, 0);
+}
+//@@INFLATE
+/**
+ * Streaming DEFLATE decompression
+ */
+export class Inflate {
+  // WebAssembly stream handle
+  private h: number;
+  // dictionary
+  private x: Uint8Array;
+  // done (final chunk pushed)
+  private d: boolean;
+  // DEFLATE stream ended
+  private f: number;
+  // unconsumed bytes after the end of the stream in the last chunk
+  private t: number;
+  // bytes pushed into the current stream
+  private n: number;
+  /**
+   * The handler to call whenever data is available
+   */
+  ondata: FlateStreamHandler;
+
+  /**
+   * Creates a DEFLATE decompression stream
+   * @param opts The decompression options
+   * @param cb The callback to call whenever data is inflated
+   */
+  constructor(opts: InflateStreamOptions, cb?: FlateStreamHandler);
+  /**
+   * Creates a DEFLATE decompression stream
+   * @param cb The callback to call whenever data is inflated
+   */
+  constructor(cb?: FlateStreamHandler);
+  constructor(opts?: InflateStreamOptions | FlateStreamHandler, cb?: FlateStreamHandler) {
+    // no StrmOpt here to avoid adding to workerizer
+    if (typeof opts == 'function') cb = opts as FlateStreamHandler, opts = {};
+    this.ondata = cb;
+    const dict = opts && (opts as InflateStreamOptions).dictionary;
+    this.x = dict ? dict.subarray(-32768) : et;
+    this.h = this.f = this.t = this.n = 0;
+  }
+
+  // frees the WebAssembly state
+  private k() {
+    if (this.h) wx().inf_free(this.h), wunreg(this), this.h = 0;
+  }
+
+  // inflates a chunk of raw DEFLATE data
+  private r(c: Uint8Array, final: boolean | number) {
+    if (this.f) {
+      this.t = c.length;
+      return new u8(0);
+    }
+    const x = wx();
+    if (!this.h) {
+      wput(x, this.x);
+      this.h = x.inf_new(this.x.length);
+      wreg(this, -this.h);
+    }
+    this.n += c.length;
+    wput(x, c);
+    const p = x.inf_push(this.h, c.length, final && this.n ? 1 : 0);
+    if (!p) {
+      const e = x.err();
+      (Inflate.prototype as unknown as { k: Inflate['k'] }).k.call(this);
+      err(e);
+    }
+    const o = wget(x, p, 0, 0);
+    this.t = c.length - x.consumed();
+    if (x.inf_ended(this.h)) this.f = 1;
+    if (this.f || final) (Inflate.prototype as unknown as { k: Inflate['k'] }).k.call(this);
+    return o;
+  }
+
+  /**
+   * Pushes a chunk to be inflated
+   * @param chunk The chunk to push
+   * @param final Whether this is the final chunk
+   */
+  push(chunk: Uint8Array, final?: boolean) {
+    if (!this.ondata) err(5);
+    if (this.d) err(4);
+    this.d = !!final;
+    this.ondata((Inflate.prototype as unknown as { r: Inflate['r'] }).r.call(this, chunk, final), !!final);
+  }
+}
+//@@INFLATESYNC
+export function inflateSync(data: Uint8Array, opts?: InflateOptions) {
+  return inflt(data, opts && opts.out, opts && opts.dictionary);
+}
+//@@GZIP
+/**
+ * Streaming GZIP compression
+ */
+export class Gzip {
+  private v = 1;
+  private z = 0;
+  private o: GzipOptions;
+  private k: number;
+  /**
+   * The handler to call whenever data is available
+   */
+  ondata: FlateStreamHandler;
+
+  /**
+   * Creates a GZIP stream
+   * @param opts The compression options
+   * @param cb The callback to call whenever data is deflated
+   */
+  constructor(opts: GzipOptions, cb?: FlateStreamHandler);
+  /**
+   * Creates a GZIP stream
+   * @param cb The callback to call whenever data is deflated
+   */
+  constructor(cb?: FlateStreamHandler);
+  constructor(opts?: GzipOptions | FlateStreamHandler, cb?: FlateStreamHandler) {
+    Deflate.call(this, opts, cb);
+  }
+
+  /**
+   * Pushes a chunk to be GZIPped
+   * @param chunk The chunk to push
+   * @param final Whether this is the last chunk
+   */
+  push(chunk: Uint8Array, final?: boolean) {
+    (Gzip.prototype as unknown as { p: Gzip['p'] }).p.call(this, chunk, final ? 3 : 0);
+    this.z += chunk.length;
+  }
+
+  private p(c: Uint8Array, f: number) {
+    const o = this.o;
+    const raw = (Deflate.prototype as unknown as { q: (c: Uint8Array, f: number, m: number, pre: number, post: number) => Uint8Array }).q.call(this, c, f, 1, this.v ? gzhl(o) : 0, f == 3 ? 8 : 0);
+    if (raw) {
+      if (this.v) gzh(raw, o), this.v = 0;
+      if (f == 3) wbytes(raw, raw.length - 8, this.k), wbytes(raw, raw.length - 4, this.z + c.length);
+      this.ondata(raw, f == 3);
+    }
+  }
+
+  /**
+   * Flushes buffered uncompressed data. Useful to immediately retrieve the
+   * GZIPped output for small inputs.
+   * @param sync Whether to flush to a byte boundary. A sync flush takes 4-5
+   *             extra bytes, but guarantees all pushed data is immediately
+   *             decompressible.
+   */
+  flush(sync?: boolean) {
+    (Gzip.prototype as unknown as { p: Gzip['p'] }).p.call(this, et, sync ? 2 : 1);
+  }
+}
+//@@GZIPSYNC
+export function gzipSync(data: Uint8Array, opts?: GzipOptions) {
+  if (!opts) opts = {};
+  const l = data.length;
+  const d = dopt(data, opts, gzhl(opts), 8, 1), s = d.length;
+  return gzh(d, opts), wbytes(d, s - 8, wx().last_check()), wbytes(d, s - 4, l), d;
+}
+//@@GUNZIP
+/**
+ * Streaming single or multi-member GZIP decompression
+ */
+export class Gunzip {
+  // awaiting a member header
+  private v = 1;
+  // total bytes pushed
+  private r = 0;
+  // members started
+  private m = 0;
+  // pending bytes
+  private p: Uint8Array;
+  private d: boolean;
+  private f: number;
+  private t: number;
+  private n: number;
+  /**
+   * The handler to call whenever data is available
+   */
+  ondata: FlateStreamHandler;
+  /**
+   * The handler to call whenever a new GZIP member is found
+   */
+  onmember?: GunzipMemberHandler;
+
+  /**
+   * Creates a GUNZIP stream
+   * @param opts The decompression options
+   * @param cb The callback to call whenever data is inflated
+   */
+  constructor(opts: GunzipStreamOptions, cb?: FlateStreamHandler);
+  /**
+   * Creates a GUNZIP stream
+   * @param cb The callback to call whenever data is inflated
+   */
+  constructor(cb?: FlateStreamHandler);
+  constructor(opts?: GunzipStreamOptions | FlateStreamHandler, cb?: FlateStreamHandler) {
+    Inflate.call(this, opts, cb);
+    this.p = et;
+  }
+
+  /**
+   * Pushes a chunk to be GUNZIPped
+   * @param chunk The chunk to push
+   * @param final Whether this is the last chunk
+   */
+  push(chunk: Uint8Array, final?: boolean) {
+    if (!this.ondata) err(5);
+    if (this.d) err(4);
+    this.d = !!final;
+    this.r += chunk.length;
+    let p = this.p.length ? cat(this.p, chunk) : chunk;
+    const outs: Uint8Array<ArrayBuffer>[] = [];
+    for (;;) {
+      if (this.v) {
+        if (!p.length) break;
+        const s = p.length > 3 ? gzs(p) : 4;
+        if (s > p.length) {
+          if (final) p = et;
+          break;
+        }
+        if (this.m++ && this.onmember) this.onmember(this.r - p.length);
+        p = p.subarray(s);
+        this.v = this.f = this.n = 0;
+      }
+      if (this.f) {
+        // skip the CRC32 and ISIZE trailer, then look for another member
+        if (p.length < 8) break;
+        p = p.subarray(8);
+        this.v = 1;
+        continue;
+      }
+      if (!p.length) break;
+      outs.push((Inflate.prototype as unknown as { r: (c: Uint8Array, f: number) => Uint8Array }).r.call(this, p, 0));
+      p = p.subarray(p.length - this.t);
+      if (!this.f) break;
+    }
+    if (final) {
+      const unfinished = !this.v && !this.f && this.n;
+      (Inflate.prototype as unknown as { k: () => void }).k.call(this);
+      if (unfinished) err(0);
+      this.p = et;
+    } else this.p = p.length ? slc(p, 0) : et;
+    const last = final ? (outs.length ? outs.pop() : new u8(0)) : null;
+    for (let i = 0; i < outs.length; ++i) if (outs[i].length) this.ondata(outs[i], false);
+    if (last) this.ondata(last, true);
+  }
+}
+//@@GUNZIPSYNC
+export function gunzipSync(data: Uint8Array, opts?: GunzipOptions) {
+  const st = gzs(data);
+  if (st + 8 > data.length) err(6, 'invalid gzip data');
+  return inflt(data.subarray(st, -8), opts && opts.out, opts && opts.dictionary, gzl(data));
+}
+//@@ZLIB
+/**
+ * Streaming Zlib compression
+ */
+export class Zlib {
+  private v = 1;
+  private o: ZlibOptions;
+  private k: number;
+  /**
+   * The handler to call whenever data is available
+   */
+  ondata: FlateStreamHandler;
+
+  /**
+   * Creates a Zlib stream
+   * @param opts The compression options
+   * @param cb The callback to call whenever data is deflated
+   */
+  constructor(opts: ZlibOptions, cb?: FlateStreamHandler);
+  /**
+   * Creates a Zlib stream
+   * @param cb The callback to call whenever data is deflated
+   */
+  constructor(cb?: FlateStreamHandler);
+  constructor(opts?: ZlibOptions | FlateStreamHandler, cb?: FlateStreamHandler) {
+    Deflate.call(this, opts, cb);
+  }
+
+  /**
+   * Pushes a chunk to be zlibbed
+   * @param chunk The chunk to push
+   * @param final Whether this is the last chunk
+   */
+  push(chunk: Uint8Array, final?: boolean) {
+    (Zlib.prototype as unknown as { p: Zlib['p'] }).p.call(this, chunk, final ? 3 : 0);
+  }
+
+  private p(c: Uint8Array, f: number) {
+    const o = this.o;
+    const raw = (Deflate.prototype as unknown as { q: (c: Uint8Array, f: number, m: number, pre: number, post: number) => Uint8Array }).q.call(this, c, f, 2, this.v ? (o.dictionary ? 6 : 2) : 0, f == 3 ? 4 : 0);
+    if (raw) {
+      if (this.v) zlh(raw, o), this.v = 0;
+      if (f == 3) wbytes(raw, raw.length - 4, bsw(this.k));
+      this.ondata(raw, f == 3);
+    }
+  }
+
+  /**
+   * Flushes buffered uncompressed data. Useful to immediately retrieve the
+   * zlibbed output for small inputs.
+   * @param sync Whether to flush to a byte boundary. A sync flush takes 4-5
+   *             extra bytes, but guarantees all pushed data is immediately
+   *             decompressible.
+   */
+  flush(sync?: boolean) {
+    (Zlib.prototype as unknown as { p: Zlib['p'] }).p.call(this, et, sync ? 2 : 1);
+  }
+}
+//@@ZLIBSYNC
+export function zlibSync(data: Uint8Array, opts?: ZlibOptions) {
+  if (!opts) opts = {};
+  const d = dopt(data, opts, opts.dictionary ? 6 : 2, 4, 2);
+  return zlh(d, opts), wbytes(d, d.length - 4, bsw(wx().last_check())), d;
+}
+//@@UNZLIB
+/**
+ * Streaming Zlib decompression
+ */
+export class Unzlib {
+  // awaiting header (1, or 2 when a dictionary is expected)
+  private v: number;
+  // pending header bytes
+  private p: Uint8Array;
+  // trailing bytes after the DEFLATE stream
+  private z: number;
+  private d: boolean;
+  private f: number;
+  private t: number;
+  /**
+   * The handler to call whenever data is available
+   */
+  ondata: FlateStreamHandler;
+
+  /**
+   * Creates a Zlib decompression stream
+   * @param opts The decompression options
+   * @param cb The callback to call whenever data is inflated
+   */
+  constructor(opts: UnzlibStreamOptions, cb?: FlateStreamHandler);
+  /**
+   * Creates a Zlib decompression stream
+   * @param cb The callback to call whenever data is inflated
+   */
+  constructor(cb?: FlateStreamHandler);
+  constructor(opts?: UnzlibStreamOptions | FlateStreamHandler, cb?: FlateStreamHandler) {
+    Inflate.call(this, opts, cb);
+    this.v = opts && (opts as UnzlibStreamOptions).dictionary ? 2 : 1;
+    this.p = et;
+    this.z = 0;
+  }
+
+  /**
+   * Pushes a chunk to be unzlibbed
+   * @param chunk The chunk to push
+   * @param final Whether this is the last chunk
+   */
+  push(chunk: Uint8Array, final?: boolean) {
+    if (!this.ondata) err(5);
+    if (this.d) err(4);
+    let p = chunk;
+    if (this.v) {
+      p = this.p.length ? cat(this.p, chunk) : chunk;
+      if (p.length < 6 && !final) {
+        this.p = slc(p, 0);
+        return;
+      }
+      p = p.subarray(zls(p, this.v - 1)), this.v = 0, this.p = et;
+    }
+    this.d = !!final;
+    const o = (Inflate.prototype as unknown as { r: (c: Uint8Array, f: boolean) => Uint8Array }).r.call(this, p, final);
+    if (this.f) this.z += this.t;
+    if (final && this.z < 4) err(6, 'invalid zlib data');
+    this.ondata(o, !!final);
+  }
+}
+//@@UNZLIBSYNC
+export function unzlibSync(data: Uint8Array, opts?: UnzlibOptions) {
+  return inflt(data.subarray(zls(data, opts && opts.dictionary), -4), opts && opts.out, opts && opts.dictionary);
+}
