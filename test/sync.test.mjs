@@ -148,10 +148,18 @@ test('corrupt input never crashes the engine', () => {
   same(r.inflateSync(c), data);
 });
 
-test('large input (40 MiB) round trip', () => {
+test('large inputs (throwaway instance) keep correct checksums', () => {
   const data = new Uint8Array(40 << 20);
   for (let i = 0; i < data.length; i++) data[i] = (i * 2654435761) >>> 27;
+  // node:zlib verifies the gzip CRC32 and zlib Adler32 trailers
+  same(new Uint8Array(zlib.gunzipSync(r.gzipSync(data, { level: 1 }))), data);
+  same(new Uint8Array(zlib.inflateSync(r.zlibSync(data, { level: 1 }))), data);
   same(r.gunzipSync(r.gzipSync(data, { level: 1 })), data);
+  const big = data.subarray(0, 20 << 20);
+  const z = r.zipSync({ big }, { level: 1, mtime: new Date(2020, 0, 1) });
+  const view = new DataView(z.buffer, z.byteOffset);
+  assert.equal(view.getUint32(14, true), zlib.crc32(big), 'zip CRC32');
+  same(r.unzipSync(z).big, big);
 });
 
 test('UTF-8 helpers match fflate', () => {

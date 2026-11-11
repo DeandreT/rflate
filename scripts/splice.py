@@ -123,18 +123,20 @@ const adler = (): CRCV => {
 }
 '''
 out = cut(out, "// crc check\ntype CRCV", "/**\n * Options for decompressing a DEFLATE stream", crc_js + "\n")
-dopt = '''// deflate with opts. mode 1/2 also computes the CRC32/Adler32 of dat (wx().last_check())
-const dopt = (dat: Uint8Array, opt: DeflateOptions, pre: number, post: number, mode?: number) => {
-  const x = wx(), dict = opt.dictionary ? opt.dictionary.subarray(-32768) : et;
+dopt = '''// deflate with opts. mode 1/2 also computes the CRC32/Adler32 of dat into ck[0]
+const dopt = (dat: Uint8Array, opt: DeflateOptions, pre: number, post: number, mode?: number, ck?: number[]) => {
+  const x = wbig(dat.length), dict = opt.dictionary ? opt.dictionary.subarray(-32768) : et;
   wput(x, dict, dat);
-  return wget(x, x.deflate_once(opt.level == null ? 6 : opt.level, opt.mem == null ? -1 : opt.mem, mode || 0, dict.length, dat.length), pre, post);
+  const r = wget(x, x.deflate_once(opt.level == null ? 6 : opt.level, opt.mem == null ? -1 : opt.mem, mode || 0, dict.length, dat.length), pre, post);
+  if (ck) ck[0] = x.last_check();
+  return r;
 }
 '''
 out = cut(out, "// deflate with opts\nconst dopt", "// Walmart object spread", dopt + "  \n\n")
 # Workers receive the compiled module instead of the engine's source.
 out = out.replace("  if (!ch[id]) {\n    let fnStr", "  wx();\n  if (!ch[id]) {\n    let fnStr", 1)
-out = cut(out, "const bInflt = () =>", "\n", "const bInflt = () => [u8, et, ec, err, slc, wm, wx, wput, wget, wreg, wunreg, cat, isc, icp, inflt, inflateSync, pbf, gopt];")
-out = cut(out, "const bDflt = () =>", "\n", "const bDflt = () => [u8, et, ec, err, slc, wm, wx, wput, wget, wreg, wunreg, dopt, deflateSync, pbf];")
+out = cut(out, "const bInflt = () =>", "\n", "const bInflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wput, wget, wreg, wunreg, cat, isc, icp, inflt, inflateSync, pbf, gopt];")
+out = cut(out, "const bDflt = () =>", "\n", "const bDflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wput, wget, wreg, wunreg, dopt, deflateSync, pbf];")
 out = cut(out, "const gze = () =>", "\n", "const gze = () => [gzh, gzhl, wbytes, crc, crct];")
 out = cut(out, "const guze = () =>", "\n", "const guze = () => [gzs, gzl, cat];")
 out = cut(out, "const zle = () =>", "\n", "const zle = () => [zlh, wbytes, adler, bsw];")
@@ -164,10 +166,9 @@ out = out.replace("      if (this.p.length > 2) {", "      if (this.p.length > 2
 old_zip = "    const d = compression ? deflateSync(file, p) : file, l = d.length;\n    const c = crc();\n    c.p(file);\n"
 assert old_zip in out
 out = out.replace(old_zip,
-    "    const d = compression ? dopt(file, p, 0, 0, 1) : file, l = d.length;\n"
-    "    let cv: number;\n"
-    "    if (compression) cv = wx().last_check();\n"
-    "    else {\n      const c = crc();\n      c.p(file);\n      cv = c.d();\n    }\n", 1)
+    "    const ck = [0], d = compression ? dopt(file, p, 0, 0, 1, ck) : file, l = d.length;\n"
+    "    let cv = ck[0];\n"
+    "    if (!compression) {\n      const c = crc();\n      c.p(file);\n      cv = c.d();\n    }\n", 1)
 out = out.replace("      crc: c.d(),\n      c: d,\n      f,\n      m,\n      u: s != fn.length || (m && (com.length != ms)),\n      o,",
                   "      crc: cv,\n      c: d,\n      f,\n      m,\n      u: s != fn.length || (m && (com.length != ms)),\n      o,", 1)
 

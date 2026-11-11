@@ -57,6 +57,11 @@ const wx = (): WasmCore => {
   return wm.x;
 }
 
+// One-shot calls on very large data run in a throwaway instance, so its memory is
+// garbage-collected afterwards instead of staying reserved by the shared instance
+// (WebAssembly memory can grow but never shrink).
+const wbig = (n: number) => n > 16777216 ? (wx(), new WebAssembly.Instance(wm, {}).exports as unknown as WasmCore) : wx();
+
 // copy one or two arrays into the WebAssembly scratch buffer
 const wput = (x: WasmCore, a: Uint8Array, b?: Uint8Array) => {
   const al = a.length, n = al + (b ? b.length : 0);
@@ -123,7 +128,7 @@ const icp = (dat: Uint8Array, e: number, o: Uint8Array, k: number) => {
 // one-shot inflate. out: buffer to fill (truncates), sz: known output size (truncates)
 const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number) => {
   if (!dat.length || (out && !out.length) || sz === 0) return out || new u8(0);
-  const cap = out ? out.length : sz || 0, x = wx();
+  const cap = out ? out.length : sz || 0, x = wbig(Math.max(dat.length, cap));
   const [p, n, f] = dat[0] & 6 ? [0, 0, 0] : isc(dat);
   let d = dict ? dict.subarray(-32768) : et;
   if (p) {

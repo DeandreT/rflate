@@ -238,8 +238,8 @@ export class Gzip {
 export function gzipSync(data: Uint8Array, opts?: GzipOptions) {
   if (!opts) opts = {};
   const l = data.length;
-  const d = dopt(data, opts, gzhl(opts), 8, 1), s = d.length;
-  return gzh(d, opts), wbytes(d, s - 8, wx().last_check()), wbytes(d, s - 4, l), d;
+  const ck = [0], d = dopt(data, opts, gzhl(opts), 8, 1, ck), s = d.length;
+  return gzh(d, opts), wbytes(d, s - 8, ck[0]), wbytes(d, s - 4, l), d;
 }
 //@@GUNZIP
 /**
@@ -397,8 +397,8 @@ export class Zlib {
 //@@ZLIBSYNC
 export function zlibSync(data: Uint8Array, opts?: ZlibOptions) {
   if (!opts) opts = {};
-  const d = dopt(data, opts, opts.dictionary ? 6 : 2, 4, 2);
-  return zlh(d, opts), wbytes(d, d.length - 4, bsw(wx().last_check())), d;
+  const ck = [0], d = dopt(data, opts, opts.dictionary ? 6 : 2, 4, 2, ck);
+  return zlh(d, opts), wbytes(d, d.length - 4, bsw(ck[0])), d;
 }
 //@@UNZLIB
 /**

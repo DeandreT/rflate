@@ -148,6 +148,11 @@ const wx = (): WasmCore => {
   return wm.x;
 }
 
+// One-shot calls on very large data run in a throwaway instance, so its memory is
+// garbage-collected afterwards instead of staying reserved by the shared instance
+// (WebAssembly memory can grow but never shrink).
+const wbig = (n: number) => n > 16777216 ? (wx(), new WebAssembly.Instance(wm, {}).exports as unknown as WasmCore) : wx();
+
 // copy one or two arrays into the WebAssembly scratch buffer
 const wput = (x: WasmCore, a: Uint8Array, b?: Uint8Array) => {
   const al = a.length, n = al + (b ? b.length : 0);
@@ -214,7 +219,7 @@ const icp = (dat: Uint8Array, e: number, o: Uint8Array, k: number) => {
 // one-shot inflate. out: buffer to fill (truncates), sz: known output size (truncates)
 const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number) => {
   if (!dat.length || (out && !out.length) || sz === 0) return out || new u8(0);
-  const cap = out ? out.length : sz || 0, x = wx();
+  const cap = out ? out.length : sz || 0, x = wbig(Math.max(dat.length, cap));
   const [p, n, f] = dat[0] & 6 ? [0, 0, 0] : isc(dat);
   let d = dict ? dict.subarray(-32768) : et;
   if (p) {
@@ -501,11 +506,13 @@ export interface AsyncTerminable {
   (): void;
 }
 
-// deflate with opts. mode 1/2 also computes the CRC32/Adler32 of dat (wx().last_check())
-const dopt = (dat: Uint8Array, opt: DeflateOptions, pre: number, post: number, mode?: number) => {
-  const x = wx(), dict = opt.dictionary ? opt.dictionary.subarray(-32768) : et;
+// deflate with opts. mode 1/2 also computes the CRC32/Adler32 of dat into ck[0]
+const dopt = (dat: Uint8Array, opt: DeflateOptions, pre: number, post: number, mode?: number, ck?: number[]) => {
+  const x = wbig(dat.length), dict = opt.dictionary ? opt.dictionary.subarray(-32768) : et;
   wput(x, dict, dat);
-  return wget(x, x.deflate_once(opt.level == null ? 6 : opt.level, opt.mem == null ? -1 : opt.mem, mode || 0, dict.length, dat.length), pre, post);
+  const r = wget(x, x.deflate_once(opt.level == null ? 6 : opt.level, opt.mem == null ? -1 : opt.mem, mode || 0, dict.length, dat.length), pre, post);
+  if (ck) ck[0] = x.last_check();
+  return r;
 }
   
 
@@ -583,8 +590,8 @@ const wrkr = <T, R>(fns: (() => unknown[])[], init: (ev: MessageEvent<T>) => voi
 }
 
 // base async inflate fn
-const bInflt = () => [u8, et, ec, err, slc, wm, wx, wput, wget, wreg, wunreg, cat, isc, icp, inflt, inflateSync, pbf, gopt];
-const bDflt = () => [u8, et, ec, err, slc, wm, wx, wput, wget, wreg, wunreg, dopt, deflateSync, pbf];
+const bInflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wput, wget, wreg, wunreg, cat, isc, icp, inflt, inflateSync, pbf, gopt];
+const bDflt = () => [u8, et, ec, err, slc, wm, wx, wbig, wput, wget, wreg, wunreg, dopt, deflateSync, pbf];
 
 // gzip extra
 const gze = () => [gzh, gzhl, wbytes, crc, crct];
@@ -1265,8 +1272,8 @@ export function gzip(data: Uint8Array, opts: AsyncGzipOptions | FlateCallback, c
 export function gzipSync(data: Uint8Array, opts?: GzipOptions) {
   if (!opts) opts = {};
   const l = data.length;
-  const d = dopt(data, opts, gzhl(opts), 8, 1), s = d.length;
-  return gzh(d, opts), wbytes(d, s - 8, wx().last_check()), wbytes(d, s - 4, l), d;
+  const ck = [0], d = dopt(data, opts, gzhl(opts), 8, 1, ck), s = d.length;
+  return gzh(d, opts), wbytes(d, s - 8, ck[0]), wbytes(d, s - 4, l), d;
 }
 
 /**
@@ -1626,8 +1633,8 @@ export function zlib(data: Uint8Array, opts: AsyncZlibOptions | FlateCallback, c
  */
 export function zlibSync(data: Uint8Array, opts?: ZlibOptions) {
   if (!opts) opts = {};
-  const d = dopt(data, opts, opts.dictionary ? 6 : 2, 4, 2);
-  return zlh(d, opts), wbytes(d, d.length - 4, bsw(wx().last_check())), d;
+  const ck = [0], d = dopt(data, opts, opts.dictionary ? 6 : 2, 4, 2, ck);
+  return zlh(d, opts), wbytes(d, d.length - 4, bsw(ck[0])), d;
 }
 
 /**
@@ -2890,10 +2897,9 @@ export function zipSync(data: Zippable, opts?: ZipOptions) {
     const com = p.comment, m = com && strToU8(com), ms = m && m.length;
     const exl = exfl(p.extra);
     if (s > 65535) err(11);
-    const d = compression ? dopt(file, p, 0, 0, 1) : file, l = d.length;
-    let cv: number;
-    if (compression) cv = wx().last_check();
-    else {
+    const ck = [0], d = compression ? dopt(file, p, 0, 0, 1, ck) : file, l = d.length;
+    let cv = ck[0];
+    if (!compression) {
       const c = crc();
       c.p(file);
       cv = c.d();
