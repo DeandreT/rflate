@@ -117,14 +117,14 @@ interface WasmCore {
 // empty
 const et = /*#__PURE__*/ new u8(0);
 
-// base64 decode
+// base64 decode: native decoders when available
 const wbd = (s: string) => {
-  if (typeof atob == 'function') {
-    const b = atob(s), o = new u8(b.length);
-    for (let i = 0; i < b.length; ++i) o[i] = b.charCodeAt(i);
-    return o;
-  }
-  return new u8(Buffer.from(s, 'base64'));
+  const U = u8 as unknown as { fromBase64?: (s: string) => Uint8Array<ArrayBuffer> };
+  if (U.fromBase64) return U.fromBase64(s);
+  if (typeof Buffer != 'undefined') return new u8(Buffer.from(s, 'base64'));
+  const b = atob(s), o = new u8(b.length);
+  for (let i = 0; i < b.length; ++i) o[i] = b.charCodeAt(i);
+  return o;
 }
 
 // compiled module (sent to workers), instance exports
@@ -173,9 +173,37 @@ const cat = (a: Uint8Array, b: Uint8Array) => {
 // byte swap (big-endian Adler-32 written with wbytes)
 const bsw = (v: number) => (v & 255) << 24 | (v & 0xFF00) << 8 | (v >>> 8 & 0xFF00) | (v >>> 24);
 
+// Incompressible data is stored as raw blocks; copying those directly in JS avoids
+// three passes through WebAssembly memory. Returns null unless every block up to
+// the final one is stored and complete.
+const istr = (dat: Uint8Array, out?: Uint8Array, sz?: number) => {
+  const l = dat.length;
+  let p = 0, n = 0, f = 0;
+  for (; !f; ) {
+    if (p + 5 > l || (dat[p] & 6)) return null;
+    const len = dat[p + 1] | dat[p + 2] << 8;
+    if ((len ^ (dat[p + 3] | dat[p + 4] << 8)) != 65535 || p + 5 + len > l) return null;
+    f = dat[p] & 1, n += len, p += 5 + len;
+  }
+  const cap = out ? out.length : sz || n, o = out || new u8(Math.min(n, cap));
+  let w = 0;
+  for (p = 0; w < cap; ) {
+    const len = dat[p + 1] | dat[p + 2] << 8, c = Math.min(len, cap - w);
+    o.set(dat.subarray(p + 5, p + 5 + c), w);
+    w += c;
+    if (dat[p] & 1) break;
+    p += 5 + len;
+  }
+  return out ? out.subarray(0, w) : o;
+}
+
 // one-shot inflate. out: buffer to fill (truncates), sz: known output size (truncates)
 const inflt = (dat: Uint8Array, out?: Uint8Array, dict?: Uint8Array, sz?: number) => {
   if (!dat.length || (out && !out.length) || sz === 0) return out || new u8(0);
+  if (!(dat[0] & 6)) {
+    const st = istr(dat, out, sz);
+    if (st) return st;
+  }
   const x = wx(), d = dict ? dict.subarray(-32768) : et;
   wput(x, d, dat);
   const p = x.inflate_once(d.length, dat.length, out ? out.length : sz || 0, 0);
@@ -533,7 +561,7 @@ const wrkr = <T, R>(fns: (() => unknown[])[], init: (ev: MessageEvent<T>) => voi
 }
 
 // base async inflate fn
-const bInflt = () => [u8, et, ec, err, slc, wm, wx, wput, wget, wreg, wunreg, inflt, inflateSync, pbf, gopt];
+const bInflt = () => [u8, et, ec, err, slc, wm, wx, wput, wget, wreg, wunreg, istr, inflt, inflateSync, pbf, gopt];
 const bDflt = () => [u8, et, ec, err, slc, wm, wx, wput, wget, wreg, wunreg, dopt, deflateSync, pbf];
 
 // gzip extra

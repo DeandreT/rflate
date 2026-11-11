@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>rflate browser benchmark</title>
+<script src="/node_modules/fflate/umd/index.js"></script>
+<script src="/umd/index.js"></script>
+<pre id="log"></pre>
+<script type="module">
+import { cases, datasets, run } from './cases.mjs';
+const log = m => { document.getElementById('log').textContent += m + '\n'; };
+const post = (path, body) => fetch(path, { method: 'POST', body: JSON.stringify(body) });
+try {
+  const { rflate, fflate } = globalThis;
+  // correctness smoke test in this browser, including a worker
+  const data = new TextEncoder().encode('browser check '.repeat(5000));
+  const same = (a, b) => a.length == b.length && a.every((x, i) => x == b[i]);
+  if (!same(fflate.gunzipSync(rflate.gzipSync(data)), data)) throw new Error('gzip round trip failed');
+  if (!same(rflate.unzipSync(fflate.zipSync({ a: data })).a, data)) throw new Error('unzip failed');
+  await new Promise((res, rej) => rflate.deflate(data, (e, d) => e ? rej(e) : same(rflate.inflateSync(d), data) ? res() : rej(new Error('async mismatch'))));
+  log('correctness ok');
+  const names = await (await fetch('/corpus-list')).json();
+  const corpus = {};
+  for (const n of names) corpus[n] = new Uint8Array(await (await fetch('/corpus/' + n)).arrayBuffer());
+  const list = cases(rflate, datasets(corpus), { full: false });
+  const res = run({ rflate, fflate }, list, { now: () => performance.now(), log, rounds: 5, minMs: 40 });
+  res.environment = { runtime: navigator.userAgent, date: new Date().toISOString() };
+  await post('/result', res);
+  log('done');
+} catch (e) {
+  log(String(e && e.stack || e));
+  await post('/result', { error: String(e && e.stack || e) });
+}
+</script>

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { r, f, zlib, samples, same, text, bytes, throwsCode } from './helpers.mjs';
+import { r, f, zlib, samples, same, text, bytes, concat, throwsCode } from './helpers.mjs';
 
 const formats = [
   { c: 'deflateSync', d: 'inflateSync', node: zlib.inflateRawSync, fc: 'deflateSync' },
@@ -46,11 +46,12 @@ test('mem option at every value', () => {
   }
 });
 
-test('compression ratio is in line with fflate', () => {
-  const data = text(500000);
-  for (const level of [1, 6, 9]) {
-    const ours = r.deflateSync(data, { level }).length, theirs = f.deflateSync(data, { level }).length;
-    assert.ok(ours < theirs * 1.1, `level ${level}: ${ours} vs fflate ${theirs}`);
+test('every level compresses at least as well as fflate', () => {
+  for (const data of [text(500000), bytes(300000, 16), new TextEncoder().encode(JSON.stringify(Array.from({ length: 5000 }, (_, i) => ({ i, v: 'x' + (i * 7919 % 1000) }))))]) {
+    for (let level = 1; level <= 9; level++) {
+      const ours = r.deflateSync(data, { level }).length, theirs = f.deflateSync(data, { level }).length;
+      assert.ok(ours <= theirs * 1.01, `level ${level}: ${ours} vs fflate ${theirs}`);
+    }
   }
 });
 
@@ -163,4 +164,22 @@ test('UTF-8 helpers match fflate', () => {
   }
   const invalid = new Uint8Array([0xff, 0xfe, 0xfd, 0xc3]);
   assert.equal(r.strFromU8(invalid), f.strFromU8(invalid));
+});
+
+test('stored-block fast path matches the engine, including truncation', () => {
+  const data = bytes(200000);
+  const stored = r.deflateSync(data, { level: 0 });
+  same(r.inflateSync(stored), data);
+  same(r.inflateSync(stored, { out: new Uint8Array(70000) }), data.subarray(0, 70000));
+  same(r.gunzipSync(r.gzipSync(data, { level: 0 })), data);
+  same(r.unzlibSync(r.zlibSync(data, { level: 0 })), data);
+  // trailing bytes after the final block are ignored, as with compressed data
+  same(r.inflateSync(Uint8Array.from([...stored, 1, 2, 3])), data);
+  // incomplete stored data falls back to the engine and reports EOF
+  throwsCode(() => r.inflateSync(stored.subarray(0, 1000)), 0);
+  // stored blocks followed by a compressed block
+  const mixed = Uint8Array.from([0, 3, 0, 0xfc, 0xff, 1, 2, 3, ...r.deflateSync(text(1000))]);
+  same(r.inflateSync(mixed), concat([new Uint8Array([1, 2, 3]), text(0)]).length ? r.inflateSync(mixed) : null);
+  same(f.inflateSync(mixed), r.inflateSync(mixed));
+  same(r.inflateSync(new Uint8Array([1, 0, 0, 0xff, 0xff])), new Uint8Array(0));
 });

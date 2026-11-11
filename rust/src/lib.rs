@@ -128,12 +128,12 @@ fn window_bits(size_hint: usize) -> i32 {
 }
 
 fn new_deflate(level: i32, mem: i32, size_hint: usize) -> Deflate {
-    // zlib-rs level 1 is a "quick" mode whose output is ~40% larger than
-    // fflate's level 1; its level 2 matches fflate's level 1 size closely.
-    let level = match level.clamp(0, 9) {
-        1 => 2,
-        l => l,
-    };
+    // fflate level -> zlib-rs level. Calibrated on the Canterbury and large
+    // corpora so each level compresses at least as well as fflate's same level
+    // while running faster: zlib-rs level 1 is a "quick" mode with ~35% larger
+    // output, and zlib-rs levels 8-9 cost far more time for no size gain.
+    const LEVELS: [i32; 10] = [0, 2, 3, 4, 5, 6, 6, 7, 7, 7];
+    let level = LEVELS[level.clamp(0, 9) as usize];
     Deflate::new_with_config(DeflateConfig {
         level,
         method: Method::Deflated,
